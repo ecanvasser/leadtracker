@@ -35,7 +35,8 @@ create table daily_queue (
 
 create index on daily_queue (user_id, queue_date, priority_rank);
 create index on daily_queue (contact_id, queue_date);
-create unique index on daily_queue (contact_id, action_type, queue_date);
+-- No unique constraint — a contact can have multiple actions of the same type
+-- per day (e.g. morning SMS + afternoon SMS on Day 1).
 
 alter table daily_queue enable row level security;
 
