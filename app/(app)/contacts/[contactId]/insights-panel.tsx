@@ -6,6 +6,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { toast } from "sonner";
 import {
   Search,
@@ -22,6 +28,10 @@ import {
   Lightbulb,
   ChevronDown,
   ChevronUp,
+  Pencil,
+  ListChecks,
+  MessageCircle,
+  Activity,
 } from "lucide-react";
 import type { AiAnalysis } from "@/lib/insights/analyze";
 
@@ -64,6 +74,10 @@ export function InsightsPanel({
   const [refreshing, setRefreshing] = useState(false);
   const [addedTodos, setAddedTodos] = useState<Set<string>>(new Set());
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+
+  const [reviseOpen, setReviseOpen] = useState(false);
+  const [reviseInstructions, setReviseInstructions] = useState("");
+  const [revising, setRevising] = useState(false);
 
   useEffect(() => {
     if (contact.insights_enabled) {
@@ -177,6 +191,38 @@ export function InsightsPanel({
       toast.error("Failed to refresh insights");
     }
     setRefreshing(false);
+  }
+
+  async function handleRevise() {
+    if (!reviseInstructions.trim() || !aiAnalysis?.draft_messages) return;
+    setRevising(true);
+
+    try {
+      const res = await fetch("/api/insights/revise", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          drafts: aiAnalysis.draft_messages,
+          instructions: reviseInstructions.trim(),
+        }),
+      });
+      const data = await res.json();
+
+      if (data.error) {
+        toast.error(data.error);
+      } else {
+        setAiAnalysis({
+          ...aiAnalysis,
+          draft_messages: data.drafts,
+        });
+        setReviseOpen(false);
+        setReviseInstructions("");
+        toast.success("Drafts revised");
+      }
+    } catch {
+      toast.error("Failed to revise drafts");
+    }
+    setRevising(false);
   }
 
   async function handleCopy(text: string, index: number) {
@@ -358,127 +404,231 @@ export function InsightsPanel({
       </div>
 
       {/* AI Analysis */}
-      <div className="space-y-4">
+      <div className="space-y-5">
         {/* Status read */}
-        <Card>
-          <CardContent className="pt-4">
-            <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground mb-2">
+        <section>
+          <div className="flex items-center gap-2 mb-2.5">
+            <div className="flex items-center justify-center h-5 w-5 rounded bg-blue-500/10">
+              <Activity className="h-3 w-3 text-blue-500" />
+            </div>
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
               Status
             </h3>
-            <p className="text-sm">{aiAnalysis.status_read}</p>
-          </CardContent>
-        </Card>
+          </div>
+          <Card className="transition-colors hover:border-border">
+            <CardContent className="pt-4 pb-4">
+              <p className="text-sm leading-relaxed">{aiAnalysis.status_read}</p>
+            </CardContent>
+          </Card>
+        </section>
 
         {/* Suggested next step */}
-        <Card className="border-primary/20">
-          <CardContent className="pt-4">
-            <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground mb-2 flex items-center gap-1">
-              <Lightbulb className="h-3 w-3" />
+        <section>
+          <div className="flex items-center gap-2 mb-2.5">
+            <div className="flex items-center justify-center h-5 w-5 rounded bg-amber-500/10">
+              <Lightbulb className="h-3 w-3 text-amber-500" />
+            </div>
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
               Suggested Next Step
             </h3>
-            <p className="text-sm">{aiAnalysis.suggested_next_step}</p>
-          </CardContent>
-        </Card>
+          </div>
+          <Card className="border-primary/20 bg-primary/[0.02] transition-colors hover:border-primary/40">
+            <CardContent className="pt-4 pb-4">
+              <p className="text-sm leading-relaxed">{aiAnalysis.suggested_next_step}</p>
+            </CardContent>
+          </Card>
+        </section>
 
         {/* Draft messages */}
         {aiAnalysis.draft_messages && aiAnalysis.draft_messages.length > 0 && (
-          <div className="space-y-2">
-            <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              Draft Messages
-            </h3>
-            {aiAnalysis.draft_messages.map((draft, i) => (
-              <Card key={i}>
-                <CardContent className="pt-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <Badge variant="secondary" className="text-[10px]">
-                      {draft.channel === "email" ? (
-                        <Mail className="h-2.5 w-2.5 mr-1" />
-                      ) : (
-                        <MessageSquare className="h-2.5 w-2.5 mr-1" />
-                      )}
-                      {draft.channel.toUpperCase()}
-                    </Badge>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 text-xs"
-                      onClick={() => handleCopy(draft.body, i)}
-                    >
-                      {copiedIndex === i ? (
-                        <>
-                          <Check className="h-3 w-3 mr-1" />
-                          Copied
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="h-3 w-3 mr-1" />
-                          Copy
-                        </>
-                      )}
-                    </Button>
-                  </div>
-                  {draft.subject && (
-                    <p className="text-xs font-medium mb-1">
-                      Subject: {draft.subject}
+          <section>
+            <div className="flex items-center justify-between mb-2.5">
+              <div className="flex items-center gap-2">
+                <div className="flex items-center justify-center h-5 w-5 rounded bg-green-500/10">
+                  <MessageCircle className="h-3 w-3 text-green-500" />
+                </div>
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Draft Messages
+                </h3>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 text-xs"
+                onClick={() => setReviseOpen(true)}
+              >
+                <Pencil className="h-3 w-3 mr-1.5" />
+                Revise
+              </Button>
+            </div>
+            <div className="space-y-2.5">
+              {aiAnalysis.draft_messages.map((draft, i) => (
+                <Card
+                  key={i}
+                  className="transition-all hover:border-border hover:shadow-sm group/draft"
+                >
+                  <CardContent className="pt-4 pb-4">
+                    <div className="flex items-center justify-between mb-2.5">
+                      <Badge
+                        variant="secondary"
+                        className="text-[10px] gap-1"
+                      >
+                        {draft.channel === "email" ? (
+                          <Mail className="h-2.5 w-2.5" />
+                        ) : (
+                          <MessageSquare className="h-2.5 w-2.5" />
+                        )}
+                        {draft.channel.toUpperCase()}
+                      </Badge>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 text-xs opacity-0 group-hover/draft:opacity-100 transition-opacity"
+                        onClick={() => handleCopy(draft.body, i)}
+                      >
+                        {copiedIndex === i ? (
+                          <>
+                            <Check className="h-3 w-3 mr-1 text-green-500" />
+                            Copied
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="h-3 w-3 mr-1" />
+                            Copy
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                    {draft.subject && (
+                      <p className="text-xs font-medium mb-1.5 text-muted-foreground">
+                        Subject: {draft.subject}
+                      </p>
+                    )}
+                    <p className="text-sm whitespace-pre-wrap leading-relaxed">
+                      {draft.body}
                     </p>
-                  )}
-                  <p className="text-sm whitespace-pre-wrap">{draft.body}</p>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </section>
         )}
 
         {/* Suggested to-dos */}
         {aiAnalysis.suggested_todos && aiAnalysis.suggested_todos.length > 0 && (
-          <div className="space-y-2">
-            <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              Suggested To-Dos
-            </h3>
-            {aiAnalysis.suggested_todos.map((todo, i) => {
-              const added = isTodoAdded(todo.title);
-              return (
-                <div
-                  key={i}
-                  className="flex items-center justify-between px-3 py-2 rounded-md border"
-                >
-                  <span className="text-sm">{todo.title}</span>
-                  {added ? (
-                    <span className="text-xs text-muted-foreground flex items-center gap-1">
-                      <Check className="h-3 w-3" />
-                      Added
-                    </span>
-                  ) : (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 text-xs"
-                      onClick={() => handleAddTodo(todo.title)}
-                    >
-                      <Plus className="h-3 w-3 mr-1" />
-                      Add task
-                    </Button>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+          <section>
+            <div className="flex items-center gap-2 mb-2.5">
+              <div className="flex items-center justify-center h-5 w-5 rounded bg-purple-500/10">
+                <ListChecks className="h-3 w-3 text-purple-500" />
+              </div>
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Suggested To-Dos
+              </h3>
+            </div>
+            <div className="space-y-1.5">
+              {aiAnalysis.suggested_todos.map((todo, i) => {
+                const added = isTodoAdded(todo.title);
+                return (
+                  <div
+                    key={i}
+                    className="flex items-center justify-between px-3 py-2.5 rounded-lg border transition-all hover:border-border hover:bg-muted/30 group/todo"
+                  >
+                    <span className="text-sm">{todo.title}</span>
+                    {added ? (
+                      <span className="text-xs text-green-600 dark:text-green-400 flex items-center gap-1">
+                        <Check className="h-3 w-3" />
+                        Added
+                      </span>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 text-xs opacity-0 group-hover/todo:opacity-100 transition-opacity"
+                        onClick={() => handleAddTodo(todo.title)}
+                      >
+                        <Plus className="h-3 w-3 mr-1" />
+                        Add task
+                      </Button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
         )}
       </div>
 
       {/* Conversation timeline */}
       {sortedComms.length > 0 && (
-        <div className="space-y-2">
-          <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Conversation History ({sortedComms.length} messages)
-          </h3>
+        <section>
+          <div className="flex items-center gap-2 mb-2.5">
+            <div className="flex items-center justify-center h-5 w-5 rounded bg-muted">
+              <MessageSquare className="h-3 w-3 text-muted-foreground" />
+            </div>
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Conversation History
+            </h3>
+            <Badge variant="secondary" className="text-[10px] px-1.5 py-0 font-normal">
+              {sortedComms.length}
+            </Badge>
+          </div>
           <div className="space-y-2 max-h-[500px] overflow-y-auto pr-1">
             {sortedComms.map((msg) => (
               <MessageBubble key={msg.id} message={msg} />
             ))}
           </div>
-        </div>
+        </section>
       )}
+
+      {/* Revise drafts dialog */}
+      <Dialog open={reviseOpen} onOpenChange={setReviseOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Revise draft messages</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Describe the changes you want. The AI will rewrite the drafts based on your instructions.
+            </p>
+            <textarea
+              value={reviseInstructions}
+              onChange={(e) => setReviseInstructions(e.target.value)}
+              placeholder='e.g. "Make it more casual", "Add urgency about rate lock expiring Friday", "Shorter — 2 sentences max"'
+              rows={4}
+              className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-none"
+            />
+            <div className="flex gap-2 justify-end">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setReviseOpen(false);
+                  setReviseInstructions("");
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleRevise}
+                disabled={revising || !reviseInstructions.trim()}
+              >
+                {revising ? (
+                  <>
+                    <Loader2 className="h-3 w-3 animate-spin mr-1.5" />
+                    Revising...
+                  </>
+                ) : (
+                  <>
+                    <Pencil className="h-3 w-3 mr-1.5" />
+                    Revise drafts
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -492,7 +642,7 @@ function MessageBubble({ message }: { message: CommunicationItem }) {
   return (
     <div className={`flex ${isOutbound ? "justify-end" : "justify-start"}`}>
       <div
-        className={`max-w-[85%] rounded-lg px-3 py-2 text-xs ${
+        className={`max-w-[85%] rounded-lg px-3 py-2 text-xs transition-shadow hover:shadow-sm ${
           isOutbound
             ? "bg-primary/10 border border-primary/20"
             : "bg-muted border border-border"
