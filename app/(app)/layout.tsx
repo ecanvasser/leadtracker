@@ -4,6 +4,7 @@ import Link from "next/link";
 import { ThemeSwitcher } from "@/components/theme-switcher";
 import { LogoutButton } from "@/components/logout-button";
 import { Toaster } from "@/components/ui/sonner";
+import { PageTransition } from "@/components/page-transition";
 
 export default async function AppLayout({
   children,
@@ -59,7 +60,9 @@ export default async function AppLayout({
           </div>
         </div>
       </nav>
-      <main className="flex-1 flex flex-col">{children}</main>
+      <main className="flex-1 flex flex-col">
+        <PageTransition>{children}</PageTransition>
+      </main>
       <Toaster />
     </div>
   );
