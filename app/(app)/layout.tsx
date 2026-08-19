@@ -35,6 +35,12 @@ export default async function AppLayout({
               Board
             </Link>
             <Link
+              href="/daily"
+              className="px-3 py-1.5 rounded-md hover:text-foreground hover:bg-accent transition-colors"
+            >
+              Daily
+            </Link>
+            <Link
               href="/adverse"
               className="px-3 py-1.5 rounded-md hover:text-foreground hover:bg-accent transition-colors"
             >

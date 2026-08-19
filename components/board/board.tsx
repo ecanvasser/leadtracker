@@ -27,6 +27,7 @@ import { ContactCard } from "./contact-card";
 import { ContactDialog } from "@/components/contact/contact-dialog";
 import { toast } from "sonner";
 import { useRouter } from "next/navigation";
+import { Zap } from "lucide-react";
 
 interface BoardProps {
   initialContacts: Contact[];
@@ -46,6 +47,7 @@ export function Board({
   const [taskCounts, setTaskCounts] = useState(initialTaskCounts);
   const [activeContact, setActiveContact] = useState<Contact | null>(null);
   const [showNewContact, setShowNewContact] = useState(false);
+  const [queuePending, setQueuePending] = useState(0);
   const supabase = createClient();
   const router = useRouter();
 
@@ -69,6 +71,13 @@ export function Board({
       setTaskCounts(counts);
     }
   }, [supabase]);
+
+  useEffect(() => {
+    fetch("/api/daily-queue/summary")
+      .then((r) => r.json())
+      .then((d) => { if (d.pending) setQueuePending(d.pending); })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     const contactChannel = supabase
@@ -224,12 +233,26 @@ export function Board({
     <>
       <div className="flex items-center justify-between px-4 md:px-6 py-3 border-b border-border/50">
         <h1 className="text-sm font-medium text-muted-foreground">Pipeline</h1>
-        <button
-          onClick={() => setShowNewContact(true)}
-          className="text-sm font-medium px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
-        >
-          + New lead
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => router.push("/daily")}
+            className="relative text-sm font-medium px-3 py-1.5 rounded-md border border-border hover:bg-accent transition-colors flex items-center gap-1.5"
+          >
+            <Zap className="h-3.5 w-3.5" />
+            Start my day
+            {queuePending > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 h-4 min-w-4 px-1 flex items-center justify-center rounded-full bg-red-500 text-white text-[10px] font-bold">
+                {queuePending}
+              </span>
+            )}
+          </button>
+          <button
+            onClick={() => setShowNewContact(true)}
+            className="text-sm font-medium px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+          >
+            + New lead
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-x-auto">

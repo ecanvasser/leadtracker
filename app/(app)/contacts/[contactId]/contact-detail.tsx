@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import {
@@ -32,7 +32,7 @@ import {
 } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
-import { ArrowLeft, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Phone, Mail, MessageSquare, SkipForward, Send } from "lucide-react";
 import { InsightsPanel } from "./insights-panel";
 import { useRouter } from "next/navigation";
 
@@ -65,6 +65,21 @@ export function ContactDetail({
 
   const [newTaskTitle, setNewTaskTitle] = useState("");
   const [newTaskDue, setNewTaskDue] = useState("");
+  const [outreachLog, setOutreachLog] = useState<
+    { id: string; action_type: string; status: string; draft_message: string | null; created_at: string }[]
+  >([]);
+
+  useEffect(() => {
+    supabase
+      .from("outreach_log")
+      .select("id, action_type, status, draft_message, created_at")
+      .eq("contact_id", contact.id)
+      .order("created_at", { ascending: false })
+      .limit(20)
+      .then(({ data }) => {
+        if (data) setOutreachLog(data);
+      });
+  }, [contact.id]);
 
   async function handleSave() {
     if (!name.trim()) {
@@ -391,6 +406,63 @@ export function ContactDetail({
               )}
             </div>
           </div>
+
+          {outreachLog.length > 0 && (
+            <>
+              <hr className="border-border/50" />
+              <div className="space-y-2">
+                <h3 className="text-sm font-medium">Outreach Log</h3>
+                <div className="space-y-1">
+                  {outreachLog.map((entry) => {
+                    const icon =
+                      entry.action_type === "call" ? (
+                        <Phone className="h-3 w-3" />
+                      ) : entry.action_type === "email" ? (
+                        <Mail className="h-3 w-3" />
+                      ) : (
+                        <MessageSquare className="h-3 w-3" />
+                      );
+                    const statusIcon =
+                      entry.status === "skipped" ? (
+                        <SkipForward className="h-2.5 w-2.5 text-muted-foreground" />
+                      ) : (
+                        <Send className="h-2.5 w-2.5 text-green-500" />
+                      );
+                    return (
+                      <div
+                        key={entry.id}
+                        className="flex items-start gap-2 py-1.5 group"
+                      >
+                        <span className="text-muted-foreground mt-0.5 shrink-0">{icon}</span>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            {statusIcon}
+                            <span className="text-[10px] text-muted-foreground uppercase">
+                              {entry.action_type} · {entry.status}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground ml-auto">
+                              {new Date(entry.created_at).toLocaleDateString("en-US", {
+                                month: "short",
+                                day: "numeric",
+                                hour: "numeric",
+                                minute: "2-digit",
+                              })}
+                            </span>
+                          </div>
+                          {entry.draft_message && (
+                            <p className="text-[11px] text-muted-foreground truncate mt-0.5">
+                              {entry.draft_message.slice(0, 80)}
+                              {entry.draft_message.length > 80 ? "..." : ""}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
         {/* Right column — insights */}
