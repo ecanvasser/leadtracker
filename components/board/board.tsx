@@ -26,6 +26,7 @@ import { TodoColumn } from "./todo-column";
 import { ContactCard } from "./contact-card";
 import { ContactDialog } from "@/components/contact/contact-dialog";
 import { toast } from "sonner";
+import { useRouter } from "next/navigation";
 
 interface BoardProps {
   initialContacts: Contact[];
@@ -44,9 +45,9 @@ export function Board({
   const [tasks, setTasks] = useState<TaskWithContact[]>(initialTasks);
   const [taskCounts, setTaskCounts] = useState(initialTaskCounts);
   const [activeContact, setActiveContact] = useState<Contact | null>(null);
-  const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
   const [showNewContact, setShowNewContact] = useState(false);
   const supabase = createClient();
+  const router = useRouter();
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } })
@@ -214,19 +215,10 @@ export function Board({
     setShowNewContact(false);
   }
 
-  function handleContactUpdated(updated: Contact) {
-    setContacts((prev) =>
-      prev.map((c) => (c.id === updated.id ? updated : c))
-    );
-  }
-
   function handleContactDeleted(id: string) {
     setContacts((prev) => prev.filter((c) => c.id !== id));
     setTasks((prev) => prev.filter((t) => t.contact_id !== id));
-    setSelectedContactId(null);
   }
-
-  const selectedContact = contacts.find((c) => c.id === selectedContactId) ?? null;
 
   return (
     <>
@@ -256,13 +248,13 @@ export function Board({
                 label={STAGE_LABELS[stage]}
                 contacts={contactsByStage(stage)}
                 taskCounts={taskCounts}
-                onContactClick={(id) => setSelectedContactId(id)}
+                onContactClick={(id) => router.push(`/contacts/${id}`)}
               />
             ))}
             <TodoColumn
               tasks={tasks}
               onCompleteTask={handleCompleteTask}
-              onTaskClick={(contactId) => setSelectedContactId(contactId)}
+              onTaskClick={(contactId) => router.push(`/contacts/${contactId}`)}
             />
           </div>
 
@@ -277,20 +269,6 @@ export function Board({
           </DragOverlay>
         </DndContext>
       </div>
-
-      {selectedContact && (
-        <ContactDialog
-          contact={selectedContact}
-          userId={userId}
-          open={!!selectedContactId}
-          onOpenChange={(open) => {
-            if (!open) setSelectedContactId(null);
-          }}
-          onUpdated={handleContactUpdated}
-          onDeleted={handleContactDeleted}
-          onTasksChanged={refreshTasks}
-        />
-      )}
 
       {showNewContact && (
         <ContactDialog

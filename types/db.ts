@@ -77,6 +77,9 @@ export interface Contact {
   position: number;
   adverse_reason: AdverseReason | null;
   notes: string | null;
+  bonzo_prospect_id: number | null;
+  bonzo_email: string | null;
+  insights_enabled: boolean;
   created_at: string;
   updated_at: string;
 }

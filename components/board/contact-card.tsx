@@ -2,7 +2,7 @@
 
 import { Contact, LOAN_TYPE_LABELS, CRM_LABELS } from "@/types/db";
 import { Badge } from "@/components/ui/badge";
-import { ListTodo } from "lucide-react";
+import { ListTodo, Sparkles } from "lucide-react";
 
 interface ContactCardProps {
   contact: Contact;
@@ -24,7 +24,12 @@ export function ContactCard({
         isDragging ? "shadow-lg rotate-2 scale-105" : "shadow-sm"
       }`}
     >
-      <p className="text-sm font-medium leading-tight mb-2">{contact.name}</p>
+      <div className="flex items-start justify-between mb-2">
+        <p className="text-sm font-medium leading-tight">{contact.name}</p>
+        {contact.insights_enabled && (
+          <Sparkles className="h-3 w-3 text-muted-foreground shrink-0 mt-0.5" />
+        )}
+      </div>
       <div className="flex items-center gap-1.5 flex-wrap">
         <Badge variant="secondary" className="text-[10px] px-1.5 py-0 font-normal">
           {LOAN_TYPE_LABELS[contact.loan_type]}
