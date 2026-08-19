@@ -35,8 +35,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Card, CardContent } from "@/components/ui/card";
 import { toast } from "sonner";
-import { Trash2, Plus } from "lucide-react";
+import { Trash2, Plus, Search, Loader2, Download } from "lucide-react";
 
 interface ContactDialogProps {
   contact: Contact | null;
@@ -47,6 +48,15 @@ interface ContactDialogProps {
   onUpdated?: (contact: Contact) => void;
   onDeleted?: (id: string) => void;
   onTasksChanged?: () => void;
+}
+
+type NewLeadMode = "manual" | "bonzo";
+
+interface BonzoSearchResult {
+  id: number;
+  name: string;
+  email: string;
+  phone: string | null;
 }
 
 export function ContactDialog({
@@ -61,6 +71,13 @@ export function ContactDialog({
 }: ContactDialogProps) {
   const isNew = !contact;
   const supabase = createClient();
+
+  const [mode, setMode] = useState<NewLeadMode>("manual");
+  const [bonzoEmail, setBonzoEmail] = useState("");
+  const [bonzoSearching, setBonzoSearching] = useState(false);
+  const [bonzoResult, setBonzoResult] = useState<BonzoSearchResult | null>(null);
+  const [bonzoError, setBonzoError] = useState<string | null>(null);
+  const [bonzoImporting, setBonzoImporting] = useState(false);
 
   const [name, setName] = useState(contact?.name ?? "");
   const [loanType, setLoanType] = useState<LoanType>(contact?.loan_type ?? "purchase");
@@ -88,6 +105,15 @@ export function ContactDialog({
     }
   }, [contact?.id]);
 
+  useEffect(() => {
+    if (!open) {
+      setMode("manual");
+      setBonzoEmail("");
+      setBonzoResult(null);
+      setBonzoError(null);
+    }
+  }, [open]);
+
   async function loadTasks() {
     if (!contact) return;
     setLoadingTasks(true);
@@ -99,6 +125,75 @@ export function ContactDialog({
       .order("created_at", { ascending: false });
     setTasks(data ?? []);
     setLoadingTasks(false);
+  }
+
+  async function handleBonzoSearch() {
+    if (!bonzoEmail.trim()) return;
+    setBonzoSearching(true);
+    setBonzoResult(null);
+    setBonzoError(null);
+
+    try {
+      const res = await fetch("/api/insights/search-bonzo", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: bonzoEmail.trim() }),
+      });
+      const data = await res.json();
+
+      if (data.error) {
+        setBonzoError(data.error);
+      } else if (!data.found) {
+        setBonzoError("No prospect found with that email in Bonzo.");
+      } else {
+        setBonzoResult(data.prospect);
+      }
+    } catch {
+      setBonzoError("Search failed. Try again.");
+    }
+    setBonzoSearching(false);
+  }
+
+  async function handleBonzoImport() {
+    if (!bonzoResult) return;
+    setBonzoImporting(true);
+
+    const importName = bonzoResult.name || bonzoEmail.trim();
+
+    const { data: maxPos } = await supabase
+      .from("contacts")
+      .select("position")
+      .eq("stage", "hot_lead")
+      .order("position", { ascending: false })
+      .limit(1)
+      .single();
+
+    const position = maxPos ? maxPos.position + 1000 : 1000;
+
+    const { data, error } = await supabase
+      .from("contacts")
+      .insert({
+        user_id: userId,
+        name: importName,
+        loan_type: "purchase" as LoanType,
+        crm: "bonzo" as CRM,
+        stage: "hot_lead" as AllStages,
+        position,
+        bonzo_prospect_id: bonzoResult.id,
+        bonzo_email: bonzoResult.email,
+        insights_enabled: true,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      toast.error("Failed to import contact");
+    } else {
+      toast.success(`${importName} imported from Bonzo`);
+      onCreated?.(data as Contact);
+    }
+
+    setBonzoImporting(false);
   }
 
   async function handleSave() {
@@ -234,222 +329,333 @@ export function ContactDialog({
           <DialogTitle>{isNew ? "New Lead" : contact.name}</DialogTitle>
         </DialogHeader>
 
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="name">Name</Label>
-            <Input
-              id="name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Contact name"
-            />
+        {/* Mode toggle for new leads */}
+        {isNew && (
+          <div className="flex rounded-lg border border-border p-0.5 gap-0.5">
+            <button
+              onClick={() => setMode("manual")}
+              className={`flex-1 text-xs font-medium py-1.5 rounded-md transition-colors ${
+                mode === "manual"
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Manual entry
+            </button>
+            <button
+              onClick={() => setMode("bonzo")}
+              className={`flex-1 text-xs font-medium py-1.5 rounded-md transition-colors flex items-center justify-center gap-1.5 ${
+                mode === "bonzo"
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Download className="h-3 w-3" />
+              Import from Bonzo
+            </button>
           </div>
+        )}
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-2">
-              <Label>Loan Type</Label>
-              <Select value={loanType} onValueChange={(v) => setLoanType(v as LoanType)}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {LOAN_TYPES.map((lt) => (
-                    <SelectItem key={lt} value={lt}>
-                      {LOAN_TYPE_LABELS[lt]}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+        {/* Bonzo import mode */}
+        {isNew && mode === "bonzo" && (
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Search for a prospect in Bonzo by email. The contact will be created with insights already enabled.
+            </p>
 
-            <div className="space-y-2">
-              <Label>CRM</Label>
-              <Select value={crm} onValueChange={(v) => setCrm(v as CRM)}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {CRM_OPTIONS.map((c) => (
-                    <SelectItem key={c} value={c}>
-                      {CRM_LABELS[c]}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <Label>Stage</Label>
-            <Select value={stage} onValueChange={(v) => setStage(v as AllStages)}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {ALL_STAGES.map((s) => (
-                  <SelectItem key={s} value={s}>
-                    {STAGE_LABELS[s]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {stage === "adverse" && (
-            <div className="space-y-2">
-              <Label>Adverse Reason</Label>
-              <Select value={adverseReason} onValueChange={(v) => setAdverseReason(v as AdverseReason)}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select reason..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {ADVERSE_REASONS.map((r) => (
-                    <SelectItem key={r} value={r}>
-                      {ADVERSE_REASON_LABELS[r]}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-
-          <div className="space-y-2">
-            <Label htmlFor="notes">Notes</Label>
-            <textarea
-              id="notes"
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="Add notes..."
-              rows={3}
-              className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-none"
-            />
-          </div>
-
-          <div className="flex gap-2">
-            <Button onClick={handleSave} disabled={saving} className="flex-1">
-              {saving ? "Saving..." : isNew ? "Add Lead" : "Save Changes"}
-            </Button>
-            {!isNew && (
-              confirmDelete ? (
-                <div className="flex gap-1">
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    onClick={handleDelete}
-                  >
-                    Confirm
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setConfirmDelete(false)}
-                  >
-                    Cancel
-                  </Button>
-                </div>
-              ) : (
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => setConfirmDelete(true)}
-                >
-                  <Trash2 className="h-4 w-4 text-muted-foreground" />
-                </Button>
-              )
-            )}
-          </div>
-
-          {!isNew && (
-            <>
-              <hr className="border-border/50" />
-
-              <div className="space-y-3">
-                <h3 className="text-sm font-medium">Tasks</h3>
-
-                <div className="flex gap-2">
-                  <Input
-                    placeholder="Task title"
-                    value={newTaskTitle}
-                    onChange={(e) => setNewTaskTitle(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") handleAddTask();
-                    }}
-                    className="flex-1"
-                  />
-                  <Input
-                    type="date"
-                    value={newTaskDue}
-                    onChange={(e) => setNewTaskDue(e.target.value)}
-                    className="w-[130px]"
-                  />
-                  <Button
-                    size="icon"
-                    variant="outline"
-                    onClick={handleAddTask}
-                    disabled={!newTaskTitle.trim()}
-                  >
-                    <Plus className="h-4 w-4" />
-                  </Button>
-                </div>
-
-                {loadingTasks ? (
-                  <p className="text-xs text-muted-foreground">Loading...</p>
+            <div className="flex gap-2">
+              <Input
+                type="email"
+                placeholder="Prospect's email in Bonzo"
+                value={bonzoEmail}
+                onChange={(e) => setBonzoEmail(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleBonzoSearch();
+                }}
+              />
+              <Button
+                onClick={handleBonzoSearch}
+                disabled={bonzoSearching || !bonzoEmail.trim()}
+                size="icon"
+              >
+                {bonzoSearching ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
-                  <div className="space-y-1.5">
-                    {openTasks.map((task) => (
-                      <div
-                        key={task.id}
-                        className="flex items-center gap-2 group"
-                      >
-                        <Checkbox
-                          onCheckedChange={() => handleCompleteTask(task.id)}
-                        />
-                        <span className="text-sm flex-1">{task.title}</span>
-                        {task.due_date && (
-                          <span className="text-[10px] text-muted-foreground">
-                            {new Date(task.due_date + "T00:00:00").toLocaleDateString(
-                              "en-US",
-                              { month: "short", day: "numeric" }
-                            )}
-                          </span>
-                        )}
-                        <button
-                          onClick={() => handleDeleteTask(task.id)}
-                          className="opacity-0 group-hover:opacity-100 transition-opacity"
-                        >
-                          <Trash2 className="h-3 w-3 text-muted-foreground hover:text-destructive" />
-                        </button>
-                      </div>
-                    ))}
-                    {openTasks.length === 0 && (
+                  <Search className="h-4 w-4" />
+                )}
+              </Button>
+            </div>
+
+            {bonzoError && (
+              <p className="text-sm text-destructive">{bonzoError}</p>
+            )}
+
+            {bonzoResult && (
+              <Card>
+                <CardContent className="pt-4 space-y-3">
+                  <div>
+                    <p className="font-medium text-sm">{bonzoResult.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {bonzoResult.email}
+                    </p>
+                    {bonzoResult.phone && (
                       <p className="text-xs text-muted-foreground">
-                        No open tasks
+                        {bonzoResult.phone}
                       </p>
                     )}
-                    {completedTasks.length > 0 && (
-                      <>
-                        <p className="text-[10px] text-muted-foreground uppercase tracking-wider mt-3">
-                          Recently completed
-                        </p>
-                        {completedTasks.map((task) => (
-                          <div
-                            key={task.id}
-                            className="flex items-center gap-2"
-                          >
-                            <Checkbox checked disabled />
-                            <span className="text-sm text-muted-foreground line-through">
-                              {task.title}
-                            </span>
-                          </div>
-                        ))}
-                      </>
-                    )}
                   </div>
-                )}
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      onClick={handleBonzoImport}
+                      disabled={bonzoImporting}
+                      className="flex-1"
+                    >
+                      {bonzoImporting ? (
+                        <>
+                          <Loader2 className="h-3 w-3 animate-spin mr-1.5" />
+                          Importing...
+                        </>
+                      ) : (
+                        "Import as hot lead"
+                      )}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setBonzoResult(null);
+                        setBonzoEmail("");
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+        )}
+
+        {/* Manual entry / edit mode */}
+        {(mode === "manual" || !isNew) && (
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="name">Name</Label>
+              <Input
+                id="name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Contact name"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-2">
+                <Label>Loan Type</Label>
+                <Select value={loanType} onValueChange={(v) => setLoanType(v as LoanType)}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {LOAN_TYPES.map((lt) => (
+                      <SelectItem key={lt} value={lt}>
+                        {LOAN_TYPE_LABELS[lt]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
-            </>
-          )}
-        </div>
+
+              <div className="space-y-2">
+                <Label>CRM</Label>
+                <Select value={crm} onValueChange={(v) => setCrm(v as CRM)}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {CRM_OPTIONS.map((c) => (
+                      <SelectItem key={c} value={c}>
+                        {CRM_LABELS[c]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Stage</Label>
+              <Select value={stage} onValueChange={(v) => setStage(v as AllStages)}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {ALL_STAGES.map((s) => (
+                    <SelectItem key={s} value={s}>
+                      {STAGE_LABELS[s]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {stage === "adverse" && (
+              <div className="space-y-2">
+                <Label>Adverse Reason</Label>
+                <Select value={adverseReason} onValueChange={(v) => setAdverseReason(v as AdverseReason)}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select reason..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {ADVERSE_REASONS.map((r) => (
+                      <SelectItem key={r} value={r}>
+                        {ADVERSE_REASON_LABELS[r]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <Label htmlFor="notes">Notes</Label>
+              <textarea
+                id="notes"
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="Add notes..."
+                rows={3}
+                className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-none"
+              />
+            </div>
+
+            <div className="flex gap-2">
+              <Button onClick={handleSave} disabled={saving} className="flex-1">
+                {saving ? "Saving..." : isNew ? "Add Lead" : "Save Changes"}
+              </Button>
+              {!isNew && (
+                confirmDelete ? (
+                  <div className="flex gap-1">
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={handleDelete}
+                    >
+                      Confirm
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setConfirmDelete(false)}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                ) : (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setConfirmDelete(true)}
+                  >
+                    <Trash2 className="h-4 w-4 text-muted-foreground" />
+                  </Button>
+                )
+              )}
+            </div>
+
+            {!isNew && (
+              <>
+                <hr className="border-border/50" />
+
+                <div className="space-y-3">
+                  <h3 className="text-sm font-medium">Tasks</h3>
+
+                  <div className="flex gap-2">
+                    <Input
+                      placeholder="Task title"
+                      value={newTaskTitle}
+                      onChange={(e) => setNewTaskTitle(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") handleAddTask();
+                      }}
+                      className="flex-1"
+                    />
+                    <Input
+                      type="date"
+                      value={newTaskDue}
+                      onChange={(e) => setNewTaskDue(e.target.value)}
+                      className="w-[130px]"
+                    />
+                    <Button
+                      size="icon"
+                      variant="outline"
+                      onClick={handleAddTask}
+                      disabled={!newTaskTitle.trim()}
+                    >
+                      <Plus className="h-4 w-4" />
+                    </Button>
+                  </div>
+
+                  {loadingTasks ? (
+                    <p className="text-xs text-muted-foreground">Loading...</p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {openTasks.map((task) => (
+                        <div
+                          key={task.id}
+                          className="flex items-center gap-2 group"
+                        >
+                          <Checkbox
+                            onCheckedChange={() => handleCompleteTask(task.id)}
+                          />
+                          <span className="text-sm flex-1">{task.title}</span>
+                          {task.due_date && (
+                            <span className="text-[10px] text-muted-foreground">
+                              {new Date(task.due_date + "T00:00:00").toLocaleDateString(
+                                "en-US",
+                                { month: "short", day: "numeric" }
+                              )}
+                            </span>
+                          )}
+                          <button
+                            onClick={() => handleDeleteTask(task.id)}
+                            className="opacity-0 group-hover:opacity-100 transition-opacity"
+                          >
+                            <Trash2 className="h-3 w-3 text-muted-foreground hover:text-destructive" />
+                          </button>
+                        </div>
+                      ))}
+                      {openTasks.length === 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          No open tasks
+                        </p>
+                      )}
+                      {completedTasks.length > 0 && (
+                        <>
+                          <p className="text-[10px] text-muted-foreground uppercase tracking-wider mt-3">
+                            Recently completed
+                          </p>
+                          {completedTasks.map((task) => (
+                            <div
+                              key={task.id}
+                              className="flex items-center gap-2"
+                            >
+                              <Checkbox checked disabled />
+                              <span className="text-sm text-muted-foreground line-through">
+                                {task.title}
+                              </span>
+                            </div>
+                          ))}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );
