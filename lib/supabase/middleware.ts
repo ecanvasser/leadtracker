@@ -48,10 +48,17 @@ export async function updateSession(request: NextRequest) {
   const user = data?.claims;
 
   const path = request.nextUrl.pathname;
+  // Machine-to-machine endpoints authenticate themselves and must not be
+  // redirected to /login. The Telegram webhook verifies a secret header; the
+  // worker drain verifies a bearer WORKER_SECRET. Both arrive without a
+  // Supabase session cookie, so session-based redirection would make them
+  // permanently unreachable — the pg_cron tick would just 307 to the login
+  // page forever.
+  const isMachineEndpoint =
+    path.startsWith("/api/telegram") || path.startsWith("/api/worker");
+
   const isPublic =
-    path === "/login" ||
-    path.startsWith("/auth") ||
-    path.startsWith("/api/telegram");
+    path === "/login" || path.startsWith("/auth") || isMachineEndpoint;
 
   if (!user && !isPublic) {
     const url = request.nextUrl.clone();
