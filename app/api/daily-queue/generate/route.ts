@@ -103,6 +103,159 @@ function buildProspectContext(
   return ctx;
 }
 
+/**
+ * Leads per drafting request.
+ *
+ * Held at 4 deliberately. Each call carries a fixed prefix — system prompt,
+ * and later the voice profile and style exemplars — of roughly 2,300 tokens
+ * that is resent per chunk. At 4 leads that overhead amortises sensibly; at 1
+ * lead per chunk it dominates and roughly triples drafting cost. Failure
+ * isolation is not a reason to shrink this: each chunk is already wrapped
+ * independently below, and the job queue handles durability.
+ */
+const DRAFT_CHUNK_SIZE = 4;
+
+/** Chunks in flight at once. Small enough to stay clear of rate limits. */
+const DRAFT_CONCURRENCY = 3;
+
+type PendingAction = { contact: Contact; action: QueueAction; cache: InsightsCache };
+
+function fallbackDraft(
+  { contact, action }: PendingAction,
+  index: number
+): DraftResult {
+  return {
+    action_index: index,
+    contact_id: contact.id,
+    action_type: action.actionType,
+    draft_message:
+      action.actionType === "call"
+        ? null
+        : "(Draft generation failed — write your own message)",
+    email_subject: null,
+    call_talking_points:
+      action.actionType === "call"
+        ? "• Open with a friendly greeting\n• Ask about their timeline\n• Offer to answer any questions"
+        : null,
+  };
+}
+
+function parseDraftResponse(text: string): DraftResult[] {
+  const cleaned = text
+    .replace(/^```json\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
+  const parsed = JSON.parse(cleaned);
+  if (!Array.isArray(parsed)) throw new Error("Draft response was not an array");
+  return parsed as DraftResult[];
+}
+
+/**
+ * Drafts one chunk. Retries once on a parse failure, then gives up and lets
+ * the caller fall back for this chunk alone.
+ */
+async function draftChunk(
+  chunk: { item: PendingAction; index: number }[],
+  timeZone: string
+): Promise<DraftResult[]> {
+  const client = new Anthropic();
+
+  const prompt = chunk
+    .map(({ item, index }) =>
+      buildProspectContext(item.contact, item.cache, item.action, index, timeZone)
+    )
+    .join("\n\n");
+
+  // Scaled to the chunk rather than fixed at 4096. A truncated response is
+  // what turned one bad generation into "(Draft generation failed)" for every
+  // lead in the queue.
+  const maxTokens = Math.min(8192, 1200 * chunk.length);
+
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await client.messages.create({
+        model: "claude-sonnet-4-6",
+        max_tokens: maxTokens,
+        system: QUEUE_DRAFT_SYSTEM,
+        messages: [{ role: "user", content: prompt }],
+      });
+      const text =
+        response.content[0]?.type === "text" ? response.content[0].text : "";
+      if (response.stop_reason === "max_tokens") {
+        throw new Error("Draft response hit max_tokens and was truncated");
+      }
+      return parseDraftResponse(text);
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Drafts every pending action in independent chunks.
+ *
+ * The previous implementation concatenated every prospect into a single
+ * request and JSON.parsed the whole response, so any truncation replaced
+ * *every* draft with the failure placeholder. Now a chunk that fails degrades
+ * only its own leads.
+ */
+async function generateDrafts(
+  allActions: PendingAction[],
+  timeZone: string
+): Promise<DraftResult[]> {
+  const indexed = allActions.map((item, index) => ({ item, index }));
+  const chunks: (typeof indexed)[] = [];
+  for (let i = 0; i < indexed.length; i += DRAFT_CHUNK_SIZE) {
+    chunks.push(indexed.slice(i, i + DRAFT_CHUNK_SIZE));
+  }
+
+  const results: DraftResult[] = [];
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < chunks.length) {
+      const chunk = chunks[cursor++];
+      try {
+        const drafted = await draftChunk(chunk, timeZone);
+        // Keep only indices this chunk was actually asked for, so a confused
+        // response cannot clobber another chunk's drafts.
+        const allowed = new Set(chunk.map((c) => c.index));
+        const kept = drafted.filter((d) => allowed.has(d.action_index));
+        const missing = chunk.filter(
+          (c) => !kept.some((d) => d.action_index === c.index)
+        );
+        if (missing.length > 0) {
+          console.warn(
+            `[daily-queue/generate] chunk returned ${kept.length}/${chunk.length} drafts; ` +
+              `falling back for indices ${missing.map((m) => m.index).join(", ")}`
+          );
+        }
+        results.push(
+          ...kept,
+          ...missing.map(({ item, index }) => fallbackDraft(item, index))
+        );
+      } catch (e) {
+        console.error(
+          `[daily-queue/generate] chunk failed for indices ` +
+            `${chunk.map((c) => c.index).join(", ")}: ` +
+            `${e instanceof Error ? e.message : String(e)}`
+        );
+        results.push(
+          ...chunk.map(({ item, index }) => fallbackDraft(item, index))
+        );
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(DRAFT_CONCURRENCY, chunks.length) }, worker)
+  );
+
+  return results;
+}
+
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
   const { data: authData } = await supabase.auth.getClaims();
@@ -179,7 +332,7 @@ export async function POST(request: NextRequest) {
     insightsByContact[cache.contact_id] = cache;
   }
 
-  const allActions: { contact: Contact; action: QueueAction; cache: InsightsCache }[] = [];
+  const allActions: PendingAction[] = [];
 
   for (const contact of contacts as Contact[]) {
     const history = outreachByContact[contact.id] ?? [];
@@ -214,35 +367,7 @@ export async function POST(request: NextRequest) {
     return new Date(a.contact.created_at).getTime() - new Date(b.contact.created_at).getTime();
   });
 
-  let drafts: DraftResult[] = [];
-  try {
-    const batchPrompt = allActions
-      .map(({ contact, action, cache }, idx) =>
-        buildProspectContext(contact, cache, action, idx, timeZone)
-      )
-      .join("\n\n");
-
-    const client = new Anthropic();
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 4096,
-      system: QUEUE_DRAFT_SYSTEM,
-      messages: [{ role: "user", content: batchPrompt }],
-    });
-
-    const text = response.content[0].type === "text" ? response.content[0].text : "";
-    const cleaned = text.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
-    drafts = JSON.parse(cleaned) as DraftResult[];
-  } catch {
-    drafts = allActions.map(({ contact, action }, idx) => ({
-      action_index: idx,
-      contact_id: contact.id,
-      action_type: action.actionType,
-      draft_message: action.actionType === "call" ? null : "(Draft generation failed — write your own message)",
-      email_subject: null,
-      call_talking_points: action.actionType === "call" ? "• Open with a friendly greeting\n• Ask about their timeline\n• Offer to answer any questions" : null,
-    }));
-  }
+  const drafts = await generateDrafts(allActions, timeZone);
 
   const draftMap = new Map<number, DraftResult>();
   for (const d of drafts) {
