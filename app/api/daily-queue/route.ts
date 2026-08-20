@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { localDateFor } from "@/lib/time";
 
 export async function GET() {
   const supabase = await createClient();
@@ -9,7 +10,7 @@ export async function GET() {
   }
 
   const userId = authData.claims.sub as string;
-  const todayStr = new Date().toISOString().split("T")[0];
+  const todayStr = await localDateFor(userId);
 
   const { data: queue } = await supabase
     .from("daily_queue")

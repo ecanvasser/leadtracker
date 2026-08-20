@@ -1,4 +1,40 @@
 import { Contact } from "@/types/db";
+import {
+  DEFAULT_TIMEZONE,
+  addLocalDays,
+  isLocalSaturday,
+  isLocalSunday,
+  leadAgeDays,
+  localDate,
+} from "@/lib/time";
+
+/**
+ * Everything time-dependent in the engine is evaluated against this rather
+ * than the process clock, so a lead actioned at 5:30 PM Pacific is still
+ * "today" and the Saturday/Sunday rules fire on the broker's local weekend
+ * instead of UTC's.
+ *
+ * `now` is injectable so the rules can be tested at specific instants.
+ */
+export interface CadenceContext {
+  timeZone: string;
+  now: Date;
+  /** Sunday on/off toggle, from user_settings.cadence_config. */
+  workSunday: boolean;
+  workSaturday: boolean;
+}
+
+export function defaultCadenceContext(
+  overrides: Partial<CadenceContext> = {}
+): CadenceContext {
+  return {
+    timeZone: DEFAULT_TIMEZONE,
+    now: new Date(),
+    workSunday: false,
+    workSaturday: true,
+    ...overrides,
+  };
+}
 
 export interface OutreachLogEntry {
   id: string;
@@ -30,23 +66,8 @@ interface CadenceTarget {
   channelHint: ("sms" | "email")[];
 }
 
-function getLeadAgeDays(contact: Contact): number {
-  const created = new Date(contact.created_at);
-  const now = new Date();
-  const diffMs = now.getTime() - created.getTime();
-  return Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)));
-}
-
-function getDayOfWeek(): number {
-  return new Date().getDay();
-}
-
-function isSaturday(): boolean {
-  return getDayOfWeek() === 6;
-}
-
-function isSunday(): boolean {
-  return getDayOfWeek() === 0;
+function getLeadAgeDays(contact: Contact, ctx: CadenceContext): number {
+  return leadAgeDays(contact.created_at, ctx.timeZone, ctx.now);
 }
 
 function getCadenceTarget(ageDays: number): CadenceTarget {
@@ -89,7 +110,8 @@ function alternateChannel(last: "sms" | "email" | null): "sms" | "email" {
 }
 
 function detectUnansweredReply(
-  bonzoComms: BonzoCommEntry[]
+  bonzoComms: BonzoCommEntry[],
+  ctx: CadenceContext
 ): { hasUnanswered: boolean; lastReplyAge: string | null } {
   if (bonzoComms.length === 0) return { hasUnanswered: false, lastReplyAge: null };
 
@@ -100,7 +122,7 @@ function detectUnansweredReply(
   const lastMsg = sorted[0];
   if (lastMsg.direction === "inbound") {
     const replyTime = new Date(lastMsg.created_at);
-    const now = new Date();
+    const now = ctx.now;
     const diffHours = Math.round((now.getTime() - replyTime.getTime()) / (1000 * 60 * 60));
     const ageStr = diffHours < 1 ? "just now" : diffHours === 1 ? "1 hour ago" : `${diffHours} hours ago`;
     return { hasUnanswered: true, lastReplyAge: ageStr };
@@ -111,16 +133,15 @@ function detectUnansweredReply(
 
 function checkOverdue(
   ageDays: number,
-  recentLog: OutreachLogEntry[]
+  recentLog: OutreachLogEntry[],
+  ctx: CadenceContext
 ): boolean {
   if (ageDays === 0) return false;
 
-  const yesterday = new Date();
-  yesterday.setDate(yesterday.getDate() - 1);
-  const yesterdayStr = yesterday.toISOString().split("T")[0];
+  const yesterdayStr = addLocalDays(localDate(ctx.now, ctx.timeZone), -1);
 
   const yesterdayActions = recentLog.filter((e) => {
-    const d = new Date(e.created_at).toISOString().split("T")[0];
+    const d = localDate(e.created_at, ctx.timeZone);
     return d === yesterdayStr && e.status !== "skipped";
   });
 
@@ -133,26 +154,31 @@ function checkOverdue(
 export function calculateTodayActions(
   contact: Contact,
   outreachHistory: OutreachLogEntry[],
-  bonzoCommunication: BonzoCommEntry[]
+  bonzoCommunication: BonzoCommEntry[],
+  context: Partial<CadenceContext> = {}
 ): QueueAction[] {
-  if (isSunday()) return [];
+  const ctx = defaultCadenceContext(context);
 
-  const ageDays = getLeadAgeDays(contact);
-  const saturday = isSaturday();
+  // Weekend rules evaluate on the broker's local calendar. Sunday is a
+  // configurable toggle rather than a hardcoded bail-out.
+  if (!ctx.workSunday && isLocalSunday(ctx.now, ctx.timeZone)) return [];
+  const saturday = isLocalSaturday(ctx.now, ctx.timeZone);
+  if (!ctx.workSaturday && saturday) return [];
+
+  const ageDays = getLeadAgeDays(contact, ctx);
   const cadence = getCadenceTarget(ageDays);
 
-  const todayStr = new Date().toISOString().split("T")[0];
-  const todayLog = outreachHistory.filter((e) => {
-    const d = new Date(e.created_at).toISOString().split("T")[0];
-    return d === todayStr;
-  });
+  const todayStr = localDate(ctx.now, ctx.timeZone);
+  const todayLog = outreachHistory.filter(
+    (e) => localDate(e.created_at, ctx.timeZone) === todayStr
+  );
 
   const todayMessages = todayLog.filter((e) => e.action_type !== "call" && e.status !== "skipped");
   const todayCalls = todayLog.filter((e) => e.action_type === "call" && e.status !== "skipped");
 
   const actions: QueueAction[] = [];
 
-  const { hasUnanswered, lastReplyAge } = detectUnansweredReply(bonzoCommunication);
+  const { hasUnanswered, lastReplyAge } = detectUnansweredReply(bonzoCommunication, ctx);
 
   if (hasUnanswered) {
     const lastChannel = getLastChannelUsed(todayLog);
@@ -178,7 +204,7 @@ export function calculateTodayActions(
   const remainingMessages = Math.max(0, targetMessages - todayMessages.length);
   const remainingCalls = Math.max(0, targetCalls - todayCalls.length);
 
-  const isOverdue = checkOverdue(ageDays, outreachHistory);
+  const isOverdue = checkOverdue(ageDays, outreachHistory, ctx);
 
   let baseScore = 100;
   if (ageDays === 0) baseScore = 500;

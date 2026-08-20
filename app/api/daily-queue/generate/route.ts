@@ -4,6 +4,7 @@ import { createServiceClient } from "@/lib/supabase/service";
 import { calculateTodayActions, type QueueAction, type OutreachLogEntry, type BonzoCommEntry } from "@/lib/cadence/engine";
 import { Contact } from "@/types/db";
 import Anthropic from "@anthropic-ai/sdk";
+import { getUserTimezone, localDate } from "@/lib/time";
 
 const QUEUE_DRAFT_SYSTEM = `You are a sales assistant for a mortgage broker who specializes in speed-to-lead outreach. You're generating today's outreach messages for multiple prospects.
 
@@ -100,11 +101,17 @@ export async function POST(request: NextRequest) {
   const userId = authData.claims.sub as string;
   const serviceClient = createServiceClient();
 
+  // "Today" is the broker's local day, resolved once and reused everywhere
+  // below. Computing it per-query with toISOString() rolled the queue over at
+  // 5 PM Pacific and silently discarded the afternoon block.
+  const timeZone = await getUserTimezone(userId);
+  const todayStr = localDate(new Date(), timeZone);
+
   const { data: existingQueue } = await serviceClient
     .from("daily_queue")
     .select("created_at")
     .eq("user_id", userId)
-    .eq("queue_date", new Date().toISOString().split("T")[0])
+    .eq("queue_date", todayStr)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -167,7 +174,7 @@ export async function POST(request: NextRequest) {
     const cache = insightsByContact[contact.id];
     const comms = cache?.bonzo_communication ?? [];
 
-    const actions = calculateTodayActions(contact, history, comms);
+    const actions = calculateTodayActions(contact, history, comms, { timeZone });
 
     for (const action of actions) {
       allActions.push({
@@ -183,7 +190,7 @@ export async function POST(request: NextRequest) {
       .from("daily_queue")
       .delete()
       .eq("user_id", userId)
-      .eq("queue_date", new Date().toISOString().split("T")[0]);
+      .eq("queue_date", todayStr);
 
     return NextResponse.json({ queue: [], generated: true });
   }
@@ -226,8 +233,6 @@ export async function POST(request: NextRequest) {
   for (const d of drafts) {
     draftMap.set(`${d.contact_id}:${d.action_type}`, d);
   }
-
-  const todayStr = new Date().toISOString().split("T")[0];
 
   await serviceClient
     .from("daily_queue")

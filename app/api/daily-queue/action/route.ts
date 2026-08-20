@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
+import { localDateFor } from "@/lib/time";
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
@@ -60,7 +61,7 @@ export async function POST(request: NextRequest) {
     draft_message: message,
   });
 
-  const todayStr = new Date().toISOString().split("T")[0];
+  const todayStr = await localDateFor(userId);
   const { data: nextItem } = await serviceClient
     .from("daily_queue")
     .select("*, contacts(name, loan_type, crm, stage, created_at, insights_enabled)")
