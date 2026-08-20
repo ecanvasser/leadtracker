@@ -23,6 +23,7 @@ import type { BonzoCommEntry } from "@/lib/cadence/engine";
 import { classifyLeadState, type LeadState } from "@/lib/insights/lead-state";
 import { getUserTimezone, localDate, leadAgeDays } from "@/lib/time";
 import { enqueueJob } from "@/lib/jobs/queue";
+import { scanForCallCommitments, recordProposedCall } from "@/lib/calls/scan";
 import { generateDrafts, type PendingAction } from "@/lib/ai/draft";
 import { resolveCadenceConfig } from "@/lib/cadence/config";
 import { planLead } from "@/lib/cadence/engine";
@@ -85,7 +86,7 @@ export const refreshCache: JobHandler = async (supabase, job) => {
 
   const { data: contact, error: contactErr } = await supabase
     .from("contacts")
-    .select("id, user_id, bonzo_prospect_id, bonzo_email, insights_enabled, stage, created_at")
+    .select("id, user_id, bonzo_prospect_id, bonzo_email, insights_enabled, stage, created_at, phone")
     .eq("id", contactId)
     .maybeSingle();
 
@@ -103,7 +104,7 @@ export const refreshCache: JobHandler = async (supabase, job) => {
 
   const { data: cache } = await supabase
     .from("insights_cache")
-    .select("ai_analysis, last_message_at, last_inbound_at, bonzo_prospect_data, lead_state")
+    .select("ai_analysis, last_message_at, last_inbound_at, bonzo_prospect_data, lead_state, calls_scanned_through")
     .eq("contact_id", contactId)
     .maybeSingle();
 
@@ -204,6 +205,16 @@ export const refreshCache: JobHandler = async (supabase, job) => {
     newestInbound !== null &&
     (previousInbound === null || newestInbound.getTime() > previousInbound);
 
+  // 3.4 — persist the number. It was previously fetched, displayed once and
+  // thrown away, so a reminder had nothing to read off.
+  const prospectPhone = (resolved as { phone?: string | null }).phone ?? null;
+  if (prospectPhone && prospectPhone !== contact.phone) {
+    await supabase
+      .from("contacts")
+      .update({ phone: prospectPhone })
+      .eq("id", contactId);
+  }
+
   const { error: upsertErr } = await supabase.from("insights_cache").upsert(
     {
       contact_id: contactId,
@@ -221,10 +232,51 @@ export const refreshCache: JobHandler = async (supabase, job) => {
       last_synced_at: new Date().toISOString(),
       last_message_at: newest ? newest.toISOString() : null,
       last_inbound_at: newestInbound ? newestInbound.toISOString() : null,
+      calls_scanned_through: newest ? newest.toISOString() : null,
     },
     { onConflict: "contact_id" }
   );
   if (upsertErr) throw upsertErr;
+
+  // 3.1 — look for a call commitment in the new messages. Pattern-first, so
+  // most of these cost nothing; the model is reached only when the wording is
+  // genuinely ambiguous.
+  let proposedCall: string | null = null;
+  try {
+    const scan = await scanForCallCommitments({
+      userId: contact.user_id,
+      contactId,
+      prospect: resolved as unknown as Record<string, unknown>,
+      communications,
+      scannedThrough: cache?.calls_scanned_through ?? null,
+      brokerTimezone: timeZone,
+      phone: prospectPhone ?? contact.phone ?? null,
+    });
+
+    if (scan.proposed) {
+      const callId = await recordProposedCall(supabase, {
+        userId: contact.user_id,
+        contactId,
+        scheduledAt: scan.proposed.scheduledAt,
+        zone: scan.proposed.zone,
+        candidate: scan.proposed.candidate,
+      });
+
+      if (callId) {
+        proposedCall = callId;
+        // Confirmation is a human decision — a misparsed time is worse than
+        // no reminder, so this only ever asks.
+        const { pushCallConfirmation } = await import("@/lib/telegram/call-confirm");
+        await pushCallConfirmation(supabase, contact.user_id, callId).catch(
+          (e: unknown) =>
+            console.error("[jobs/refresh_cache] call confirmation push failed:", e)
+        );
+      }
+    }
+  } catch (e) {
+    // Call detection is an enhancement; it must not fail the refresh.
+    console.error(`[jobs/refresh_cache] call scan failed for ${contactId}:`, e);
+  }
 
   // Follow-on work, enqueued rather than done inline so this handler stays
   // short and the reply path is retried on its own if drafting fails.
@@ -244,7 +296,8 @@ export const refreshCache: JobHandler = async (supabase, job) => {
         ? `; ${classification.state.lead_temp}/${classification.state.blocker} ` +
           `-> ${classification.state.recommended_action}`
         : "; classification failed") +
-      (hasNewInbound ? "; new inbound reply, queued a response" : ""),
+      (hasNewInbound ? "; new inbound reply, queued a response" : "") +
+      (proposedCall ? "; proposed a call for confirmation" : ""),
     usedModel: true,
   };
 };

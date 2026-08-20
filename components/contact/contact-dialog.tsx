@@ -182,6 +182,8 @@ export function ContactDialog({
         bonzo_prospect_id: bonzoResult.id,
         bonzo_email: bonzoResult.email,
         insights_enabled: true,
+        // Reminders need a number; without this it was fetched and discarded.
+        phone: bonzoResult.phone ?? null,
       })
       .select()
       .single();

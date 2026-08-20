@@ -201,7 +201,34 @@ export async function POST(request: NextRequest) {
   /** Leads the engine deliberately stayed quiet on, surfaced in the response. */
   const held: { contactId: string; name: string; reason: string; recommendAdverse: boolean }[] = [];
 
+  // 3.3 — a confirmed call suppresses other outreach to that lead until it
+  // resolves. Texting someone an hour before a call you already booked is
+  // exactly the kind of thing that makes an assistant feel automated.
+  const suppressedByCall = new Set<string>();
+  {
+    const now = Date.now();
+    const { data: upcoming } = await serviceClient
+      .from("scheduled_calls")
+      .select("contact_id")
+      .eq("user_id", userId)
+      .eq("status", "confirmed")
+      .gte("scheduled_at", new Date(now - 2 * 60 * 60 * 1000).toISOString())
+      .lte("scheduled_at", new Date(now + 24 * 60 * 60 * 1000).toISOString());
+
+    for (const row of upcoming ?? []) suppressedByCall.add(row.contact_id);
+  }
+
   for (const contact of contacts as Contact[]) {
+    if (suppressedByCall.has(contact.id)) {
+      held.push({
+        contactId: contact.id,
+        name: contact.name,
+        reason: "Call scheduled — holding other outreach until it resolves",
+        recommendAdverse: false,
+      });
+      continue;
+    }
+
     const history = outreachByContact[contact.id] ?? [];
     const cache = insightsByContact[contact.id];
     const comms = cache?.bonzo_communication ?? [];

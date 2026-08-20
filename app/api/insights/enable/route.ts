@@ -37,6 +37,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Contact not found" }, { status: 404 });
   }
 
+  // The full prospect payload carries the number; enrollment is the first
+  // chance to keep it.
+  const prospectPhone =
+    (bonzoProspectData as { phone?: string | null } | null)?.phone ?? null;
+
   try {
     const { error: updateErr } = await serviceClient
       .from("contacts")
@@ -44,6 +49,9 @@ export async function POST(request: NextRequest) {
         bonzo_prospect_id: bonzoProspectId,
         bonzo_email: bonzoEmail,
         insights_enabled: true,
+        // 3.4 — captured at enrollment so a call reminder has a number to
+        // show. Refresh keeps it current afterwards.
+        ...(prospectPhone ? { phone: prospectPhone } : {}),
       })
       .eq("id", contactId);
 

@@ -28,6 +28,7 @@ import {
 } from "@/lib/telegram/approval-card";
 import { buildCardInput, pushNextCard, releaseCard } from "@/lib/telegram/push";
 import { DIGEST_START, handleDigestStart } from "@/lib/telegram/digest";
+import { isCallCallback, handleCallCallback } from "@/lib/telegram/call-confirm";
 import { addLocalDays, getUserTimezone, localDate } from "@/lib/time";
 import type { SessionData } from "@/lib/telegram/session";
 
@@ -133,6 +134,30 @@ export async function handleApprovalCallback(
     const problem = await handleDigestStart(supabase, digestUser);
     if (problem) await ctx.reply(problem);
     else await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } });
+    return true;
+  }
+
+  // Call confirmation and outcome buttons.
+  if (isCallCallback(data)) {
+    const callUser = await getUserIdByTelegramId(supabase, ctx.from.id);
+    if (!callUser) {
+      await ctx.answerCallbackQuery({ text: "Not linked to an account." });
+      return true;
+    }
+    await ctx.answerCallbackQuery();
+    const outcome = await handleCallCallback(supabase, callUser, data);
+    if (outcome) {
+      try {
+        const original = ctx.callbackQuery?.message;
+        const existing = original && "text" in original ? (original.text ?? "") : "";
+        await ctx.editMessageText(`${escapeHtml(existing)}\n\n${outcome}`, {
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: [] },
+        });
+      } catch {
+        await ctx.reply(outcome);
+      }
+    }
     return true;
   }
 
