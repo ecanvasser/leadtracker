@@ -4,6 +4,8 @@ import { createServiceClient } from "@/lib/supabase/service";
 import {
   getCommunicationHistory,
   getProspectNotes,
+  getProspect,
+  getMortgageFields,
   type BonzoProspect,
 } from "@/lib/bonzo/client";
 import { analyzeProspect } from "@/lib/insights/analyze";
@@ -53,7 +55,25 @@ export async function POST(request: NextRequest) {
       getProspectNotes(bonzoProspectId),
     ]);
 
-    const prospect = bonzoProspectData as BonzoProspect;
+    // The client sends the full record from search-bonzo. If it ever arrives
+    // truncated again, re-read it here rather than caching a stub — a cache
+    // row without mortgage data is the whole context-starvation bug.
+    let prospect = bonzoProspectData as BonzoProspect;
+    if (getMortgageFields(prospect) === null) {
+      const refetched = await getProspect(bonzoProspectId).catch(() => null);
+      if (refetched) prospect = refetched;
+    }
+
+    if (getMortgageFields(prospect) === null) {
+      // Loud on purpose. Every draft for this lead will be written without
+      // loan amount, credit score, property value, purpose or employment.
+      console.error(
+        `[insights/enable] No mortgage fields for Bonzo prospect ${bonzoProspectId} ` +
+          `(contact ${contactId}). Drafts for this lead will lack loan context. ` +
+          `Keys present: ${Object.keys(prospect ?? {}).join(", ") || "none"}`
+      );
+    }
+
     const aiAnalysis = await analyzeProspect(prospect, communications, notes);
 
     const { error: cacheErr } = await serviceClient
@@ -70,16 +90,7 @@ export async function POST(request: NextRequest) {
         { onConflict: "contact_id" }
       );
 
-    if (cacheErr) {
-      await serviceClient.from("insights_cache").insert({
-        contact_id: contactId,
-        user_id: userId,
-        bonzo_prospect_data: prospect,
-        bonzo_communication: communications,
-        ai_analysis: aiAnalysis,
-        generated_at: new Date().toISOString(),
-      });
-    }
+    if (cacheErr) throw cacheErr;
 
     return NextResponse.json({
       aiAnalysis,

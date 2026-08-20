@@ -5,6 +5,7 @@ import { calculateTodayActions, type QueueAction, type OutreachLogEntry, type Bo
 import { Contact } from "@/types/db";
 import Anthropic from "@anthropic-ai/sdk";
 import { getUserTimezone, localDate } from "@/lib/time";
+import { getMortgageFields } from "@/lib/bonzo/client";
 
 const QUEUE_DRAFT_SYSTEM = `You are a sales assistant for a mortgage broker who specializes in speed-to-lead outreach. You're generating today's outreach messages for multiple prospects.
 
@@ -59,7 +60,7 @@ function buildProspectContext(
   );
 
   const name = [prospect.first_name, prospect.last_name].filter(Boolean).join(" ") || contact.name;
-  const mf = prospect.mortgage_fields as Record<string, string> | undefined;
+  const mf = getMortgageFields(prospect);
 
   let ctx = `--- PROSPECT: ${name} (ID: ${contact.id}) ---\n`;
   ctx += `Lead age: Day ${ageDays + 1}\n`;

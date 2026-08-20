@@ -1,8 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type {
-  BonzoProspect,
-  BonzoCommunication,
-  BonzoNote,
+import {
+  getMortgageFields,
+  type BonzoProspect,
+  type BonzoCommunication,
+  type BonzoNote,
 } from "@/lib/bonzo/client";
 
 export interface AiAnalysis {
@@ -45,29 +46,33 @@ function buildUserMessage(
   const name = [prospect.first_name, prospect.last_name]
     .filter(Boolean)
     .join(" ");
-  const mf = prospect.mortgage_fields;
+  const mf = getMortgageFields(prospect);
 
   let msg = `PROSPECT PROFILE:
 Name: ${name || "Unknown"}
 Email: ${prospect.email || "N/A"}
 Phone: ${prospect.phone || "N/A"}
 Status: ${prospect.status || "N/A"}
-Pipeline Stage: ${prospect.pipeline_stage || "N/A"}`;
+Pipeline Stage: ${prospect.pipeline_stage?.name || "N/A"}`;
 
   if (mf) {
+    // Field names transcribed from Bonzo's OpenAPI document. The previous list
+    // included annual_income, employment_status and agent_* — none of which
+    // Bonzo returns, so they were always blank.
     const fields = [
       ["Loan Type", mf.loan_type],
       ["Loan Purpose", mf.loan_purpose],
+      ["Loan Program", mf.loan_program],
       ["Loan Amount", mf.loan_amount],
+      ["Down Payment", mf.down_payment],
       ["Credit Score", mf.credit_score],
       ["Property Address", mf.property_address],
+      ["Property City", mf.property_city],
+      ["Property State", mf.property_state],
+      ["Property Zip", mf.property_zip],
       ["Property Value", mf.property_value],
-      ["Down Payment", mf.down_payment],
-      ["Annual Income", mf.annual_income],
-      ["Employment Status", mf.employment_status],
-      ["Agent Name", mf.agent_name],
-      ["Agent Email", mf.agent_email],
-      ["Agent Phone", mf.agent_phone],
+      ["Found Home", mf.found_home === 1 ? "Yes" : mf.found_home === 0 ? "No" : null],
+      ["Bankruptcy", mf.bankruptcy === 1 ? "Yes" : mf.bankruptcy === 0 ? "No" : null],
     ]
       .filter(([, v]) => v)
       .map(([k, v]) => `${k}: ${v}`)

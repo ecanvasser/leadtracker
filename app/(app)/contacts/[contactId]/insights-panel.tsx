@@ -65,6 +65,9 @@ export function InsightsPanel({
   const [loading, setLoading] = useState(false);
   const [searchEmail, setSearchEmail] = useState("");
   const [searchResult, setSearchResult] = useState<BonzoSearchResult | null>(null);
+  // The complete Bonzo record, kept so enrollment caches loan context rather
+  // than the {id,name,email,phone} preview stub.
+  const [fullProspect, setFullProspect] = useState<Record<string, unknown> | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
 
@@ -75,15 +78,21 @@ export function InsightsPanel({
   const [addedTodos, setAddedTodos] = useState<Set<string>>(new Set());
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
 
+  // Enrollment is tracked in state rather than by assigning to the prop.
+  // `contact.insights_enabled = true` mutated a value React owns, so the
+  // component re-rendered from a prop that no longer matched the server.
+  const [enabled, setEnabled] = useState(contact.insights_enabled);
+
   const [reviseOpen, setReviseOpen] = useState(false);
   const [reviseInstructions, setReviseInstructions] = useState("");
   const [revising, setRevising] = useState(false);
 
   useEffect(() => {
+    setEnabled(contact.insights_enabled);
     if (contact.insights_enabled) {
       loadCachedInsights();
     }
-  }, [contact.id]);
+  }, [contact.id, contact.insights_enabled]);
 
   async function loadCachedInsights() {
     setLoading(true);
@@ -105,6 +114,7 @@ export function InsightsPanel({
     if (!searchEmail.trim()) return;
     setSearching(true);
     setSearchResult(null);
+    setFullProspect(null);
     setSearchError(null);
 
     try {
@@ -123,6 +133,12 @@ export function InsightsPanel({
         );
       } else {
         setSearchResult(data.prospect);
+        setFullProspect(data.fullProspect ?? null);
+        if (data.fullProspect && !data.hasMortgageFields) {
+          toast.warning(
+            "Found in Bonzo, but this prospect has no mortgage details filled in. Drafts will have no loan context."
+          );
+        }
       }
     } catch {
       setSearchError("Search failed. Try again.");
@@ -135,13 +151,10 @@ export function InsightsPanel({
     setLoading(true);
 
     try {
-      const searchRes = await fetch("/api/insights/search-bonzo", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: searchEmail.trim() }),
-      });
-      const searchData = await searchRes.json();
-
+      // handleSearch already stored the complete prospect record. The previous
+      // second call here read searchData.fullProspect, a key that endpoint did
+      // not return, so it silently fell back to the {id,name,email,phone} stub
+      // and every cached lead lost its mortgage context.
       const res = await fetch("/api/insights/enable", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -149,7 +162,7 @@ export function InsightsPanel({
           contactId: contact.id,
           bonzoProspectId: searchResult.id,
           bonzoEmail: searchResult.email,
-          bonzoProspectData: searchData.fullProspect ?? searchResult,
+          bonzoProspectData: fullProspect ?? searchResult,
         }),
       });
 
@@ -160,7 +173,7 @@ export function InsightsPanel({
         setAiAnalysis(data.aiAnalysis);
         setCommunications(data.communications ?? []);
         setGeneratedAt(data.generatedAt);
-        contact.insights_enabled = true;
+        setEnabled(true);
         toast.success("Insights generated");
       }
     } catch {
@@ -244,7 +257,7 @@ export function InsightsPanel({
   }
 
   // State 1: Not enrolled
-  if (!contact.insights_enabled) {
+  if (!enabled) {
     return (
       <div className="p-4 md:p-6">
         <div className="max-w-md mx-auto py-12">
