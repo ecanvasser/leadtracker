@@ -21,6 +21,7 @@ import {
   deferJob,
   reapStuckJobs,
   reapTelegramSessions,
+  releaseJobs,
   countRunnableJobs,
   type Job,
 } from "@/lib/jobs/queue";
@@ -48,8 +49,16 @@ const BATCH_SIZE = 5;
  */
 const MAX_CHAIN_DEPTH = 12;
 
-/** Wall-clock budget for one invocation, leaving headroom under the limit. */
-const TIME_BUDGET_MS = 45_000;
+/**
+ * Wall-clock budget for one invocation.
+ *
+ * Deliberately under the 30s pg_net timeout in the cron migration. Overrunning
+ * it does not lose the work — the function keeps going — but pg_net records no
+ * response, so cron.job_run_details shows a tick with no visible outcome and
+ * the queue becomes hard to diagnose from SQL alone. Throughput comes from
+ * chaining, not from letting one invocation run long.
+ */
+const TIME_BUDGET_MS = 25_000;
 
 function unauthorized() {
   return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -126,6 +135,7 @@ export async function POST(request: NextRequest) {
     detail?: string;
   }[] = [];
   const exhausted: Job[] = [];
+  const processed = new Set<string>();
 
   for (const job of jobs) {
     const handler = handlers[job.job_type];
@@ -171,7 +181,25 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    processed.add(job.id);
+
     if (Date.now() - startedAt > TIME_BUDGET_MS) break;
+  }
+
+  // Anything claimed but not reached is released rather than left in
+  // 'running'. claimJobs marks the whole batch running up front, so breaking
+  // on the time budget would otherwise strand the remainder for the full
+  // ten-minute reaper window — and the reaper counts the attempt, so a job
+  // that never ran would burn a retry and, for handlers that call the model,
+  // pay for the work twice.
+  const stranded = jobs.filter((j) => !processed.has(j.id));
+  if (stranded.length > 0) {
+    try {
+      await releaseJobs(supabase, stranded.map((j) => j.id));
+    } catch (e) {
+      // The reaper is the backstop if this fails.
+      console.error("[worker/drain] failed to release stranded jobs:", e);
+    }
   }
 
   // A job that has exhausted its retries must surface rather than fail
@@ -209,6 +237,7 @@ export async function POST(request: NextRequest) {
     claimed: jobs.length,
     reaped,
     sweeps,
+    released: stranded.length,
     remaining,
     chained,
     chainDepth,

@@ -223,3 +223,25 @@ export async function countRunnableJobs(
   if (error) throw error;
   return count ?? 0;
 }
+
+/**
+ * Returns claimed-but-unprocessed jobs to pending.
+ *
+ * claim_jobs marks a whole batch running and increments attempts up front.
+ * When the worker stops early on its time budget, the remainder never ran and
+ * must not be left looking like in-flight work: the stuck-job reaper would
+ * count an attempt against them ten minutes later, burning a retry for work
+ * that never started and paying twice for any model calls on the rerun.
+ *
+ * Status reset and attempt decrement happen in one statement — see the
+ * release_jobs migration.
+ */
+export async function releaseJobs(
+  supabase: SupabaseClient,
+  jobIds: string[]
+): Promise<number> {
+  if (jobIds.length === 0) return 0;
+  const { data, error } = await supabase.rpc("release_jobs", { job_ids: jobIds });
+  if (error) throw error;
+  return (data as number) ?? 0;
+}
