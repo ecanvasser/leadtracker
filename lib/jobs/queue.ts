@@ -194,6 +194,23 @@ export async function reapStuckJobs(supabase: SupabaseClient): Promise<number> {
   return (data as number) ?? 0;
 }
 
+/**
+ * Deletes expired Telegram session rows.
+ *
+ * Piggybacks on the worker tick rather than getting its own cron schedule —
+ * Supabase guidance is to keep concurrent cron jobs in the single digits, and
+ * this is a single cheap DELETE that has no reason to be scheduled separately.
+ * Expired sessions already read as absent, so this is housekeeping, not
+ * correctness.
+ */
+export async function reapTelegramSessions(
+  supabase: SupabaseClient
+): Promise<number> {
+  const { data, error } = await supabase.rpc("reap_telegram_sessions");
+  if (error) throw error;
+  return (data as number) ?? 0;
+}
+
 export async function countRunnableJobs(
   supabase: SupabaseClient
 ): Promise<number> {

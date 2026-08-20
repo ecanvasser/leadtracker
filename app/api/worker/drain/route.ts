@@ -20,6 +20,7 @@ import {
   failJob,
   deferJob,
   reapStuckJobs,
+  reapTelegramSessions,
   countRunnableJobs,
   type Job,
 } from "@/lib/jobs/queue";
@@ -90,6 +91,13 @@ export async function POST(request: NextRequest) {
     reaped = await reapStuckJobs(supabase);
   } catch (e) {
     console.error("[worker/drain] reap failed:", e);
+  }
+
+  // Housekeeping, not correctness — expired sessions already read as absent.
+  try {
+    await reapTelegramSessions(supabase);
+  } catch (e) {
+    console.error("[worker/drain] session reap failed:", e);
   }
 
   let jobs: Job[];

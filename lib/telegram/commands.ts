@@ -1,6 +1,7 @@
 import { type Context } from "grammy";
 import { createServiceClient } from "@/lib/supabase/service";
 import { getUserIdByTelegramId, redeemLinkToken } from "@/lib/db/telegram";
+import { withSession, type SessionData } from "@/lib/telegram/session";
 import {
   getAllContacts,
   createContact,
@@ -11,9 +12,7 @@ import { getOpenTasks, createTask, completeTask } from "@/lib/db/tasks";
 import {
   LOAN_TYPE_LABELS,
   STAGE_LABELS,
-  PIPELINE_STAGES,
   ALL_STAGES,
-  ADVERSE_REASONS,
   ADVERSE_REASON_LABELS,
   type LoanType,
   type CRM,
@@ -31,15 +30,23 @@ import {
   adverseReasonKeyboard,
 } from "./keyboards";
 
-const sessions = new Map<number, Record<string, string>>();
+/**
+ * Flow handlers receive their session state and a clear() rather than reaching
+ * for a module-level map. See lib/telegram/session.ts for why.
+ */
+type Clear = () => void;
 
-function getSession(telegramUserId: number) {
-  if (!sessions.has(telegramUserId)) sessions.set(telegramUserId, {});
-  return sessions.get(telegramUserId)!;
-}
-
-function clearSession(telegramUserId: number) {
-  sessions.delete(telegramUserId);
+/** Wraps a flow handler so its session is loaded and persisted around it. */
+function inSession(
+  fn: (ctx: Context, session: SessionData, clear: Clear) => Promise<void>
+): (ctx: Context) => Promise<void> {
+  return async (ctx: Context) => {
+    if (!ctx.from) return;
+    const supabase = createServiceClient();
+    await withSession(supabase, ctx.from.id, (handle) =>
+      fn(ctx, handle.data, () => handle.clear())
+    );
+  };
 }
 
 async function resolveUser(ctx: Context): Promise<string | null> {
@@ -127,11 +134,10 @@ export async function handleTodo(ctx: Context) {
   });
 }
 
-export async function handleAdd(ctx: Context) {
+async function addFlow(ctx: Context, session: SessionData) {
   const userId = await requireUser(ctx);
   if (!userId) return;
 
-  const session = getSession(ctx.from!.id);
   session.action = "add";
   session.userId = userId;
   session.step = "name";
@@ -180,7 +186,7 @@ export async function handleList(ctx: Context) {
   await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
 }
 
-export async function handleMove(ctx: Context) {
+async function moveFlow(ctx: Context, session: SessionData) {
   const userId = await requireUser(ctx);
   if (!userId) return;
 
@@ -193,7 +199,6 @@ export async function handleMove(ctx: Context) {
     return;
   }
 
-  const session = getSession(ctx.from!.id);
   session.action = "move";
   session.userId = userId;
 
@@ -202,7 +207,7 @@ export async function handleMove(ctx: Context) {
   });
 }
 
-export async function handleTask(ctx: Context) {
+async function taskFlow(ctx: Context, session: SessionData) {
   const userId = await requireUser(ctx);
   if (!userId) return;
 
@@ -215,7 +220,6 @@ export async function handleTask(ctx: Context) {
     return;
   }
 
-  const session = getSession(ctx.from!.id);
   session.action = "task";
   session.userId = userId;
 
@@ -260,7 +264,7 @@ export async function handleDelete(ctx: Context) {
   });
 }
 
-export async function handleCallbackQuery(ctx: Context) {
+async function callbackFlow(ctx: Context, session: SessionData, clear: Clear) {
   const data = ctx.callbackQuery?.data;
   if (!data || !ctx.from) return;
   await ctx.answerCallbackQuery();
@@ -272,10 +276,9 @@ export async function handleCallbackQuery(ctx: Context) {
     return;
   }
 
-  const session = getSession(ctx.from.id);
 
   if (data === "cancel") {
-    clearSession(ctx.from.id);
+    clear();
     await ctx.editMessageText("Cancelled.");
     return;
   }
@@ -302,14 +305,14 @@ export async function handleCallbackQuery(ctx: Context) {
         loan_type: session.loanType as LoanType,
         crm: crmVal,
       });
-      clearSession(ctx.from.id);
+      clear();
       await ctx.editMessageText(
         `Contact added: <b>${esc(contact.name)}</b>\n${LOAN_TYPE_LABELS[contact.loan_type]} · ${STAGE_LABELS[contact.stage]}`,
         { parse_mode: "HTML" }
       );
     } catch {
       await ctx.editMessageText("Failed to create contact. Try again.");
-      clearSession(ctx.from.id);
+      clear();
     }
     return;
   }
@@ -340,14 +343,14 @@ export async function handleCallbackQuery(ctx: Context) {
         stage: newStage,
         adverse_reason: null,
       });
-      clearSession(ctx.from.id);
+      clear();
       await ctx.editMessageText(
         `<b>${esc(contact.name)}</b> moved to ${STAGE_LABELS[newStage]}`,
         { parse_mode: "HTML" }
       );
     } catch {
       await ctx.editMessageText("Failed to move contact.");
-      clearSession(ctx.from.id);
+      clear();
     }
     return;
   }
@@ -362,14 +365,14 @@ export async function handleCallbackQuery(ctx: Context) {
         stage: "adverse" as AllStages,
         adverse_reason: reason,
       });
-      clearSession(ctx.from.id);
+      clear();
       await ctx.editMessageText(
         `<b>${esc(contact.name)}</b> moved to Adverse (${ADVERSE_REASON_LABELS[reason]})`,
         { parse_mode: "HTML" }
       );
     } catch {
       await ctx.editMessageText("Failed to move contact.");
-      clearSession(ctx.from.id);
+      clear();
     }
     return;
   }
@@ -412,11 +415,11 @@ export async function handleCallbackQuery(ctx: Context) {
     const contactId = data.slice(15);
     try {
       await deleteContact(supabase, contactId);
-      clearSession(ctx.from.id);
+      clear();
       await ctx.editMessageText("Contact deleted.");
     } catch {
       await ctx.editMessageText("Failed to delete contact.");
-      clearSession(ctx.from.id);
+      clear();
     }
     return;
   }
@@ -440,10 +443,9 @@ export async function handleCallbackQuery(ctx: Context) {
   }
 }
 
-export async function handleTextMessage(ctx: Context) {
+async function textFlow(ctx: Context, session: SessionData, clear: Clear) {
   if (!ctx.from || !ctx.message?.text) return;
 
-  const session = getSession(ctx.from.id);
   if (!session.action) return;
 
   const supabase = createServiceClient();
@@ -468,14 +470,14 @@ export async function handleTextMessage(ctx: Context) {
         contact_id: session.contactId!,
         title: text,
       });
-      clearSession(ctx.from.id);
+      clear();
       await ctx.reply(
         `Task added: <b>${esc(task.title)}</b>\n└ ${esc(task.contacts.name)}`,
         { parse_mode: "HTML" }
       );
     } catch {
       await ctx.reply("Failed to add task. Try again.");
-      clearSession(ctx.from.id);
+      clear();
     }
     return;
   }
@@ -484,3 +486,16 @@ export async function handleTextMessage(ctx: Context) {
 function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+
+// ---------------------------------------------------------------------------
+// Exported handlers
+//
+// Each loads its session before running and persists it afterwards, including
+// on an early return — which these handlers do constantly.
+// ---------------------------------------------------------------------------
+
+export const handleAdd = inSession(addFlow);
+export const handleMove = inSession(moveFlow);
+export const handleTask = inSession(taskFlow);
+export const handleCallbackQuery = inSession(callbackFlow);
+export const handleTextMessage = inSession(textFlow);
