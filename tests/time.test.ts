@@ -221,17 +221,53 @@ describe("timezone validation", () => {
     expect(isValidTimezone("")).toBe(false);
   });
 
-  // Intl accepts these but resolves them to fixed offsets that never observe
-  // DST, which would put every scheduled call an hour off for half the year.
-  it("rejects legacy abbreviations that resolve to a fixed offset", () => {
-    expect(isValidTimezone("EST")).toBe(false); // -> Etc/GMT+5
-    expect(isValidTimezone("PST8PDT")).toBe(false); // -> PST8PDT, no region
+  // Abbreviations are rejected outright. Intl accepts them, but what they
+  // resolve to is not stable across ICU versions — verified across a
+  // Node 22 (ICU 74) -> Node 26 (ICU 78) upgrade:
+  //   "EST"     ICU 74 -> Etc/GMT+5  ICU 78 -> America/Panama
+  //   "PST8PDT" ICU 74 -> PST8PDT    ICU 78 -> America/Los_Angeles
+  // America/Panama is a real Region/City zone, so a check based on the
+  // resolved value would let "EST" through — yet it is permanently UTC-5 and
+  // someone meaning US Eastern would be an hour off for half the year.
+  it("rejects bare timezone abbreviations", () => {
+    expect(isValidTimezone("EST")).toBe(false);
+    expect(isValidTimezone("PST")).toBe(false);
+    expect(isValidTimezone("MST")).toBe(false);
+    expect(isValidTimezone("HST")).toBe(false);
+    expect(isValidTimezone("PST8PDT")).toBe(false);
+    expect(isValidTimezone("EST5EDT")).toBe(false);
     expect(safeTimezone("EST")).toBe(DEFAULT_TIMEZONE);
   });
 
-  it("accepts an abbreviation that resolves to a real DST-aware zone", () => {
-    // "PST" is aliased to America/Los_Angeles, which does observe DST.
-    expect(isValidTimezone("PST")).toBe(true);
+  it("rejects fixed-offset pseudo-zones that never observe DST", () => {
+    expect(isValidTimezone("Etc/GMT+5")).toBe(false);
+    expect(isValidTimezone("Etc/UTC")).toBe(false);
+  });
+
+  it("accepts the Region/City zones a user should actually be setting", () => {
+    expect(isValidTimezone("America/Los_Angeles")).toBe(true);
+    expect(isValidTimezone("America/New_York")).toBe(true);
+    expect(isValidTimezone("America/Phoenix")).toBe(true);
+    expect(isValidTimezone("Pacific/Honolulu")).toBe(true);
+    expect(isValidTimezone("Europe/London")).toBe(true);
+    expect(isValidTimezone("UTC")).toBe(true);
+  });
+
+  // The property that actually matters, stated directly.
+  it("accepts a zone that tracks DST and one that legitimately does not", () => {
+    const janHour = (tz: string) =>
+      new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", hourCycle: "h23" })
+        .formatToParts(new Date("2026-01-15T18:00:00Z"))
+        .find((p) => p.type === "hour")!.value;
+    const julHour = (tz: string) =>
+      new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", hourCycle: "h23" })
+        .formatToParts(new Date("2026-07-15T18:00:00Z"))
+        .find((p) => p.type === "hour")!.value;
+
+    // New York shifts; Phoenix does not. Both are valid inputs.
+    expect(janHour("America/New_York")).not.toBe(julHour("America/New_York"));
+    expect(janHour("America/Phoenix")).toBe(julHour("America/Phoenix"));
+    expect(isValidTimezone("America/Phoenix")).toBe(true);
   });
 
   it("falls back to the default rather than throwing", () => {

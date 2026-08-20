@@ -48,25 +48,42 @@ export function assertValidTimezone(timeZone: string): void {
 }
 
 /**
- * Accepts only zones that actually track DST.
+ * Accepts only a canonical Region/City IANA identifier (or plain UTC).
  *
- * Intl is more permissive than it looks: "EST" is accepted but resolves to
- * Etc/GMT+5, a *fixed* offset that never observes daylight saving, so a user
- * who typed it would be an hour off for half the year. "PST8PDT" is similar
- * legacy baggage. Both are rejected here in favour of a real Region/City zone.
- * ("PST" itself resolves to America/Los_Angeles and is therefore fine.)
+ * This deliberately validates the *input string*, not what Intl resolves it
+ * to, because ICU's alias table is not stable across versions. Observed
+ * first-hand on a Node 22 (ICU 74) -> Node 26 (ICU 78) upgrade:
+ *
+ *   "EST"      ICU 74 -> Etc/GMT+5           ICU 78 -> America/Panama
+ *   "PST8PDT"  ICU 74 -> PST8PDT             ICU 78 -> America/Los_Angeles
+ *
+ * Both are dangerous for different reasons. Etc/GMT+5 and PST8PDT are fixed
+ * offsets that never observe DST. America/Panama *is* a real Region/City zone
+ * — so a resolution-based check waves it through — but it is permanently
+ * UTC-5, meaning someone who typed "EST" meaning US Eastern would be an hour
+ * off for half the year and nothing would look wrong.
+ *
+ * Abbreviations are therefore rejected outright. There is no way to tell
+ * whether "MST" means America/Phoenix (no DST, correct) or America/Denver
+ * (DST, also plausible), and the answer has changed between ICU releases.
  */
 export function isValidTimezone(timeZone: string): boolean {
-  let resolved: string;
+  // Must be something Intl can actually use.
   try {
-    resolved = dateFormatter(timeZone).resolvedOptions().timeZone;
+    dateFormatter(timeZone).format(new Date());
   } catch {
     return false;
   }
-  if (resolved === "UTC") return true;
-  if (resolved.startsWith("Etc/")) return false;
-  // A canonical IANA zone is always Region/City (optionally Region/Sub/City).
-  return resolved.includes("/");
+
+  if (timeZone === "UTC") return true;
+
+  // Bare abbreviations: EST, PST, MST, HST, PST8PDT, EST5EDT.
+  if (!timeZone.includes("/")) return false;
+
+  // Fixed-offset pseudo-zones that never observe DST.
+  if (timeZone.startsWith("Etc/")) return false;
+
+  return true;
 }
 
 /** Falls back to the default zone if the stored value is unusable. */
