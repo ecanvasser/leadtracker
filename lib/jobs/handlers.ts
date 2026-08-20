@@ -18,6 +18,8 @@ import {
 } from "@/lib/bonzo/client";
 import { analyzeProspect } from "@/lib/insights/analyze";
 import type { Job } from "@/lib/jobs/queue";
+import { classifyLeadState } from "@/lib/insights/lead-state";
+import { getUserTimezone, localDate, leadAgeDays } from "@/lib/time";
 
 export interface HandlerResult {
   /** Short line recorded in the drain response for observability. */
@@ -76,7 +78,7 @@ export const refreshCache: JobHandler = async (supabase, job) => {
 
   const { data: contact, error: contactErr } = await supabase
     .from("contacts")
-    .select("id, user_id, bonzo_prospect_id, bonzo_email, insights_enabled, stage")
+    .select("id, user_id, bonzo_prospect_id, bonzo_email, insights_enabled, stage, created_at")
     .eq("id", contactId)
     .maybeSingle();
 
@@ -94,7 +96,7 @@ export const refreshCache: JobHandler = async (supabase, job) => {
 
   const { data: cache } = await supabase
     .from("insights_cache")
-    .select("ai_analysis, last_message_at, bonzo_prospect_data")
+    .select("ai_analysis, last_message_at, bonzo_prospect_data, lead_state")
     .eq("contact_id", contactId)
     .maybeSingle();
 
@@ -138,7 +140,34 @@ export const refreshCache: JobHandler = async (supabase, job) => {
     );
   }
 
-  const aiAnalysis = await analyzeProspect(resolved, communications, notes);
+  // Both model calls sit behind the hasNew branch above. A refresh that finds
+  // nothing new has already returned without reaching either.
+  const timeZone = await getUserTimezone(contact.user_id, supabase);
+
+  const [aiAnalysis, classification] = await Promise.all([
+    analyzeProspect(resolved, communications, notes),
+    classifyLeadState({
+      prospect: resolved,
+      communications,
+      notes,
+      leadAgeDays: leadAgeDays(contact.created_at ?? new Date().toISOString(), timeZone),
+      todayLocal: localDate(new Date(), timeZone),
+    }).catch((e) => {
+      // Classification is valuable but not worth failing the whole refresh
+      // for — the cached history and analysis are still an improvement.
+      console.error(`[jobs/refresh_cache] classification failed for ${contactId}:`, e);
+      return null;
+    }),
+  ]);
+
+  if (classification?.evidenceRejected) {
+    // Worth seeing: the model named a blocker it could not evidence, and the
+    // rule discarded it. A run of these means the prompt needs tuning.
+    console.warn(
+      `[jobs/refresh_cache] contact ${contactId}: blocker discarded, quote not ` +
+        `found in history`
+    );
+  }
 
   const { error: upsertErr } = await supabase.from("insights_cache").upsert(
     {
@@ -147,6 +176,12 @@ export const refreshCache: JobHandler = async (supabase, job) => {
       bonzo_prospect_data: resolved,
       bonzo_communication: communications,
       ai_analysis: aiAnalysis,
+      ...(classification
+        ? {
+            lead_state: classification.state,
+            lead_state_at: new Date().toISOString(),
+          }
+        : {}),
       generated_at: new Date().toISOString(),
       last_synced_at: new Date().toISOString(),
       last_message_at: newest ? newest.toISOString() : null,
@@ -156,7 +191,12 @@ export const refreshCache: JobHandler = async (supabase, job) => {
   if (upsertErr) throw upsertErr;
 
   return {
-    summary: `refreshed with ${communications.length} messages`,
+    summary:
+      `refreshed with ${communications.length} messages` +
+      (classification
+        ? `; ${classification.state.lead_temp}/${classification.state.blocker} ` +
+          `-> ${classification.state.recommended_action}`
+        : "; classification failed"),
     usedModel: true,
   };
 };

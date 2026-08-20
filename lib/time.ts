@@ -14,7 +14,16 @@
  * and carries the full IANA database including DST rules. No dependency.
  */
 
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { createServiceClient } from "@/lib/supabase/service";
+
+/**
+ * Callers may pass their own client rather than having one constructed here.
+ * Typed as the SDK's own client so no structural matching is attempted — the
+ * generated generics are deep enough that a hand-written shape trips
+ * "type instantiation is excessively deep".
+ */
+type SupabaseLike = SupabaseClient;
 
 export const DEFAULT_TIMEZONE = "America/Los_Angeles";
 
@@ -309,12 +318,22 @@ export function clearTimezoneCache(): void {
   timezoneCache.clear();
 }
 
-/** Resolves a user's configured timezone, falling back to the default. */
-export async function getUserTimezone(userId: string): Promise<string> {
+/**
+ * Resolves a user's configured timezone, falling back to the default.
+ *
+ * Callers that already hold a client should pass it. Constructing a service
+ * client here works in a request handler but needs live environment variables,
+ * which makes any code path that reaches it awkward to test and wasteful
+ * inside the worker, where a client already exists.
+ */
+export async function getUserTimezone(
+  userId: string,
+  client?: SupabaseLike
+): Promise<string> {
   const hit = timezoneCache.get(userId);
   if (hit && Date.now() - hit.at < TIMEZONE_TTL_MS) return hit.tz;
 
-  const supabase = createServiceClient();
+  const supabase = client ?? createServiceClient();
   const { data } = await supabase
     .from("user_settings")
     .select("timezone")
@@ -334,10 +353,11 @@ export async function getUserTimezone(userId: string): Promise<string> {
  */
 export async function localDateFor(
   userIdOrTz: string,
-  now: Date = new Date()
+  now: Date = new Date(),
+  client?: SupabaseLike
 ): Promise<LocalDate> {
   const tz = isValidTimezone(userIdOrTz)
     ? userIdOrTz
-    : await getUserTimezone(userIdOrTz);
+    : await getUserTimezone(userIdOrTz, client);
   return localDate(now, tz);
 }
