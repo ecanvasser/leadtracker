@@ -9,11 +9,9 @@ import {
   ADVERSE_REASON_LABELS,
   PIPELINE_STAGES,
   STAGE_LABELS,
-  type AdverseReason,
   type PipelineStage,
 } from "@/types/db";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -113,7 +111,7 @@ export function AdverseTable({ initialContacts, userId }: AdverseTableProps) {
 
       {contacts.length === 0 ? (
         <div className="text-center py-16 text-muted-foreground text-sm">
-          No adverse contacts. That's a good thing.
+          No adverse contacts. That&apos;s a good thing.
         </div>
       ) : (
         <div className="border rounded-lg overflow-hidden">

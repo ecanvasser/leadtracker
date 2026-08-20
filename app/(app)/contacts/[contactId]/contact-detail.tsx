@@ -81,6 +81,70 @@ export function ContactDetail({
       });
   }, [contact.id]);
 
+  /**
+   * Whether the form differs from what is stored.
+   *
+   * Compared against `contact`, which is replaced on every successful save, so
+   * this goes quiet the moment a save lands.
+   */
+  const hasUnsavedChanges =
+    name !== contact.name ||
+    loanType !== contact.loan_type ||
+    crm !== contact.crm ||
+    stage !== contact.stage ||
+    (adverseReason || null) !== (contact.adverse_reason ?? null) ||
+    (notes.trim() || null) !== (contact.notes ?? null);
+
+  // Warn before a reload or tab close. The in-app case is handled by the
+  // banner below, since Next's client router cannot be intercepted reliably.
+  useEffect(() => {
+    if (!hasUnsavedChanges) return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [hasUnsavedChanges]);
+
+  /**
+   * Moves stage in one click.
+   *
+   * Changing a dropdown and clicking Save was the slowest interaction in the
+   * app for the most common thing that happens to a lead. Adverse still needs
+   * a reason, so it falls back to the form rather than committing blind.
+   */
+  async function handleQuickStage(next: AllStages) {
+    if (next === contact.stage) return;
+
+    if (next === "adverse" && !adverseReason) {
+      setStage("adverse");
+      toast("Pick a reason, then Save", {
+        description: "Adverse needs a reason so the funnel record stays honest.",
+      });
+      return;
+    }
+
+    setStage(next);
+    const { data, error } = await supabase
+      .from("contacts")
+      .update({
+        stage: next,
+        adverse_reason: next === "adverse" ? adverseReason || null : null,
+      })
+      .eq("id", contact.id)
+      .select()
+      .single();
+
+    if (error) {
+      setStage(contact.stage);
+      toast.error("Could not change stage");
+    } else {
+      setContact(data as Contact);
+      toast.success(`Moved to ${STAGE_LABELS[next]}`);
+    }
+  }
+
   async function handleSave() {
     if (!name.trim()) {
       toast.error("Name is required");
@@ -229,7 +293,42 @@ export function ContactDetail({
                 {contact.bonzo_email}
               </p>
             )}
+
+            {/* 4.10 — stage in one click. The dropdown below still exists for
+                editing everything at once, but moving a lead is the common
+                case and should not need a Save. */}
+            <div className="flex gap-1 mt-3 flex-wrap">
+              {ALL_STAGES.map((st) => (
+                <button
+                  key={st}
+                  onClick={() => handleQuickStage(st)}
+                  disabled={st === contact.stage}
+                  className={`px-2 py-1 rounded-md text-[11px] transition-colors ${
+                    st === contact.stage
+                      ? "bg-primary text-primary-foreground cursor-default"
+                      : "border border-border/60 text-muted-foreground hover:bg-accent"
+                  }`}
+                >
+                  {STAGE_LABELS[st]}
+                </button>
+              ))}
+            </div>
           </div>
+
+          {/* Unsaved-changes banner. The beforeunload handler covers reloads;
+              this covers navigating away inside the app, which Next's client
+              router does not let us intercept reliably. */}
+          {hasUnsavedChanges && (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400 flex items-center gap-2">
+              <span>Unsaved changes</span>
+              <button
+                onClick={handleSave}
+                className="ml-auto underline underline-offset-2 hover:no-underline"
+              >
+                Save now
+              </button>
+            </div>
+          )}
 
           <div className="space-y-3">
             <h3 className="text-sm font-medium">Edit Contact</h3>
@@ -313,8 +412,13 @@ export function ContactDetail({
             </div>
 
             <div className="flex gap-2">
-              <Button size="sm" onClick={handleSave} disabled={saving} className="flex-1">
-                {saving ? "Saving..." : "Save"}
+              <Button
+                size="sm"
+                onClick={handleSave}
+                disabled={saving || !hasUnsavedChanges}
+                className="flex-1"
+              >
+                {saving ? "Saving..." : hasUnsavedChanges ? "Save" : "Saved"}
               </Button>
               {confirmDelete ? (
                 <div className="flex gap-1">

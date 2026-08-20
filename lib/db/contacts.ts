@@ -1,5 +1,5 @@
 import { SupabaseClient } from "@supabase/supabase-js";
-import { Contact, LoanType, CRM, PipelineStage, AllStages, AdverseReason } from "@/types/db";
+import { Contact, LoanType, CRM, PipelineStage, AllStages } from "@/types/db";
 
 export async function getContactsByStage(
   supabase: SupabaseClient,

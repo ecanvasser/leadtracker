@@ -5,6 +5,7 @@ import { ThemeSwitcher } from "@/components/theme-switcher";
 import { LogoutButton } from "@/components/logout-button";
 import { Toaster } from "@/components/ui/sonner";
 import { PageTransition } from "@/components/page-transition";
+import { AppNav } from "@/components/app-nav";
 
 export default async function AppLayout({
   children,
@@ -28,32 +29,7 @@ export default async function AppLayout({
           >
             Mortgage Tracker
           </Link>
-          <div className="flex items-center gap-1 text-sm text-muted-foreground">
-            <Link
-              href="/board"
-              className="px-3 py-1.5 rounded-md hover:text-foreground hover:bg-accent transition-colors"
-            >
-              Board
-            </Link>
-            <Link
-              href="/daily"
-              className="px-3 py-1.5 rounded-md hover:text-foreground hover:bg-accent transition-colors"
-            >
-              Daily
-            </Link>
-            <Link
-              href="/adverse"
-              className="px-3 py-1.5 rounded-md hover:text-foreground hover:bg-accent transition-colors"
-            >
-              Adverse
-            </Link>
-            <Link
-              href="/settings"
-              className="px-3 py-1.5 rounded-md hover:text-foreground hover:bg-accent transition-colors"
-            >
-              Settings
-            </Link>
-          </div>
+          <AppNav />
           <div className="ml-auto flex items-center gap-3">
             <ThemeSwitcher />
             <LogoutButton />
