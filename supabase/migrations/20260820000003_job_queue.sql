@@ -193,8 +193,12 @@ begin
     '*/5 * * * *',
     $cron$
     select net.http_post(
-      url := (
-        select decrypted_secret from vault.decrypted_secrets where name = 'worker_url'
+      -- rtrim guards against a worker_url stored with a trailing slash, which
+      -- would otherwise build https://host//api/worker/drain and hit a
+      -- redirect instead of the route.
+      url := rtrim(
+        (select decrypted_secret from vault.decrypted_secrets where name = 'worker_url'),
+        '/'
       ) || '/api/worker/drain',
       headers := jsonb_build_object(
         'Content-Type', 'application/json',
