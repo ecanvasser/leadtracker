@@ -332,6 +332,25 @@ export async function POST(request: NextRequest) {
     insightsByContact[cache.contact_id] = cache;
   }
 
+  // 0.6: today's already-actioned rows are load-bearing. handleGenerate(true)
+  // used to delete every row for today and reinsert everything as pending,
+  // wiping the progress bar, sent counts and skips.
+  const { data: existingRows } = await serviceClient
+    .from("daily_queue")
+    .select("id, contact_id, action_type, status, priority_rank")
+    .eq("user_id", userId)
+    .eq("queue_date", todayStr);
+
+  const actionedRows = (existingRows ?? []).filter((r) => r.status !== "pending");
+
+  // How many actions of each kind are already spoken for today, so a refresh
+  // cannot resurrect something already sent, skipped or marked done.
+  const actionedCount = new Map<string, number>();
+  for (const row of actionedRows) {
+    const key = `${row.contact_id}:${row.action_type}`;
+    actionedCount.set(key, (actionedCount.get(key) ?? 0) + 1);
+  }
+
   const allActions: PendingAction[] = [];
 
   for (const contact of contacts as Contact[]) {
@@ -342,6 +361,13 @@ export async function POST(request: NextRequest) {
     const actions = calculateTodayActions(contact, history, comms, { timeZone });
 
     for (const action of actions) {
+      // Drop this action if an equivalent one was already actioned today.
+      const key = `${contact.id}:${action.actionType}`;
+      const covered = actionedCount.get(key) ?? 0;
+      if (covered > 0) {
+        actionedCount.set(key, covered - 1);
+        continue;
+      }
       allActions.push({
         contact,
         action,
@@ -351,13 +377,22 @@ export async function POST(request: NextRequest) {
   }
 
   if (allActions.length === 0) {
+    // Clear only what was still pending; anything actioned stays on the board.
     await serviceClient
       .from("daily_queue")
       .delete()
       .eq("user_id", userId)
-      .eq("queue_date", todayStr);
+      .eq("queue_date", todayStr)
+      .eq("status", "pending");
 
-    return NextResponse.json({ queue: [], generated: true });
+    const { data: remaining } = await serviceClient
+      .from("daily_queue")
+      .select("*, contacts(name, loan_type, crm, stage, created_at, insights_enabled)")
+      .eq("user_id", userId)
+      .eq("queue_date", todayStr)
+      .order("priority_rank", { ascending: true });
+
+    return NextResponse.json({ queue: remaining ?? [], generated: true });
   }
 
   allActions.sort((a, b) => {
@@ -377,11 +412,17 @@ export async function POST(request: NextRequest) {
     if (!draftMap.has(d.action_index)) draftMap.set(d.action_index, d);
   }
 
+  // Only pending rows are replaced. Actioned rows are left exactly as they are.
   await serviceClient
     .from("daily_queue")
     .delete()
     .eq("user_id", userId)
-    .eq("queue_date", todayStr);
+    .eq("queue_date", todayStr)
+    .eq("status", "pending");
+
+  // New rows rank after everything already actioned, so the progress bar keeps
+  // counting up rather than resetting.
+  const rankOffset = actionedRows.length;
 
   const queueRows = allActions.map(({ contact, action }, idx) => {
     const draft = draftMap.get(idx);
@@ -394,7 +435,7 @@ export async function POST(request: NextRequest) {
       user_id: userId,
       contact_id: contact.id,
       queue_date: todayStr,
-      priority_rank: idx + 1,
+      priority_rank: rankOffset + idx + 1,
       priority_reason: action.priorityReason,
       action_type: action.actionType,
       draft_message: draftMessage,
