@@ -3,12 +3,11 @@ import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
 import {
   getCommunicationHistory,
-  getProspectNotes,
   getProspect,
   getMortgageFields,
   type BonzoProspect,
 } from "@/lib/bonzo/client";
-import { analyzeProspect } from "@/lib/insights/analyze";
+import { refreshCache } from "@/lib/jobs/handlers";
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
@@ -50,10 +49,9 @@ export async function POST(request: NextRequest) {
 
     if (updateErr) throw updateErr;
 
-    const [communications, notes] = await Promise.all([
-      getCommunicationHistory(bonzoProspectId),
-      getProspectNotes(bonzoProspectId),
-    ]);
+    // Notes are pulled by the shared handler; only the history is needed here
+    // to seed the cache row.
+    const communications = await getCommunicationHistory(bonzoProspectId);
 
     // The client sends the full record from search-bonzo. If it ever arrives
     // truncated again, re-read it here rather than caching a stub — a cache
@@ -74,8 +72,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const aiAnalysis = await analyzeProspect(prospect, communications, notes);
-
+    // Seed the cache with the pulled state, then let the shared handler do
+    // the analysis, classification and drafting. Enrolling used to call
+    // analyzeProspect directly, which after the 1.7 consolidation would have
+    // produced no drafts at all — and it never wrote a lead_state, so a
+    // freshly enrolled lead entered the queue unclassified.
     const { error: cacheErr } = await serviceClient
       .from("insights_cache")
       .upsert(
@@ -84,18 +85,42 @@ export async function POST(request: NextRequest) {
           user_id: userId,
           bonzo_prospect_data: prospect,
           bonzo_communication: communications,
-          ai_analysis: aiAnalysis,
+          ai_analysis: {},
           generated_at: new Date().toISOString(),
+          // Null so the handler treats this as new and does a full pass.
+          last_message_at: null,
         },
         { onConflict: "contact_id" }
       );
 
     if (cacheErr) throw cacheErr;
 
+    await refreshCache(serviceClient, {
+      id: `enable-${contactId}`,
+      user_id: userId,
+      contact_id: contactId,
+      job_type: "refresh_cache",
+      payload: { source: "enable" },
+      status: "running",
+      attempts: 1,
+      last_error: null,
+      run_after: new Date().toISOString(),
+      locked_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      completed_at: null,
+    });
+
+    const { data: cache } = await serviceClient
+      .from("insights_cache")
+      .select("ai_analysis, bonzo_communication, lead_state, generated_at")
+      .eq("contact_id", contactId)
+      .maybeSingle();
+
     return NextResponse.json({
-      aiAnalysis,
-      communications,
-      generatedAt: new Date().toISOString(),
+      aiAnalysis: cache?.ai_analysis ?? null,
+      communications: cache?.bonzo_communication ?? communications,
+      leadState: cache?.lead_state ?? null,
+      generatedAt: cache?.generated_at ?? new Date().toISOString(),
     });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Failed to generate insights";
