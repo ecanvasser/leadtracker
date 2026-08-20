@@ -15,7 +15,7 @@
 import type { Contact } from "@/types/db";
 import type { QueueAction, LeadPlan, BonzoCommEntry } from "@/lib/cadence/engine";
 import type { LeadState } from "@/lib/insights/lead-state";
-import { getMortgageFields } from "@/lib/bonzo/client";
+import { getMortgageFields, isOutbound } from "@/lib/bonzo/client";
 import { leadAgeDays } from "@/lib/time";
 import { callModel, DRAFT_TEMPERATURE, type ModelUsage } from "@/lib/ai/models";
 import { buildStablePrefix } from "@/lib/ai/prompts";
@@ -141,7 +141,7 @@ export function buildProspectContext(
     );
     const recent = sorted.slice(-15);
     const thread = recent.map((c) => {
-      const dir = c.direction === "outbound" ? "BROKER" : "PROSPECT";
+      const dir = isOutbound(c.direction) ? "BROKER" : "PROSPECT";
       return `[${c.created_at}] ${dir}: ${c.content?.trim() || "(no content)"}`;
     }).join("\n");
     ctx += `\nRecent conversation:\n${thread}\n`;

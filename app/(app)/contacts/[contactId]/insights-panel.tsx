@@ -1,5 +1,7 @@
 "use client";
 
+import { isOutbound } from "@/lib/bonzo/client";
+
 import { useState, useEffect } from "react";
 import { Contact, Task } from "@/types/db";
 import { Button } from "@/components/ui/button";
@@ -649,22 +651,22 @@ export function InsightsPanel({
 
 function MessageBubble({ message }: { message: CommunicationItem }) {
   const [expanded, setExpanded] = useState(false);
-  const isOutbound = message.direction === "outbound";
+  const outbound = isOutbound(message.direction);
   const content = message.content || "(no content)";
   const isLong = content.length > 200;
 
   return (
-    <div className={`flex ${isOutbound ? "justify-end" : "justify-start"}`}>
+    <div className={`flex ${outbound ? "justify-end" : "justify-start"}`}>
       <div
         className={`max-w-[85%] rounded-lg px-3 py-2 text-xs transition-shadow hover:shadow-sm ${
-          isOutbound
+          outbound
             ? "bg-primary/10 border border-primary/20"
             : "bg-muted border border-border"
         }`}
       >
         <div className="flex items-center gap-2 mb-1">
           <span className="flex items-center gap-0.5 text-[10px] text-muted-foreground">
-            {isOutbound ? (
+            {outbound ? (
               <ArrowRight className="h-2.5 w-2.5" />
             ) : (
               <ArrowLeftIcon className="h-2.5 w-2.5" />

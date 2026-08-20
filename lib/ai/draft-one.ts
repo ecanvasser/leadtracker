@@ -21,7 +21,7 @@ import {
 } from "@/lib/ai/draft-validation";
 import { exemplarsFor } from "@/lib/ai/voice-profile";
 import type { VoiceProfile } from "@/lib/ai/voice-profile-types";
-import { getMortgageFields } from "@/lib/bonzo/client";
+import { getMortgageFields, isOutbound } from "@/lib/bonzo/client";
 import type { LeadState } from "@/lib/insights/lead-state";
 
 export interface SingleDraftResult {
@@ -210,7 +210,7 @@ function buildContext(
     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
     .slice(-15)
     .map((c) => {
-      const who = c.direction === "outbound" ? "BROKER" : "PROSPECT";
+      const who = isOutbound(c.direction) ? "BROKER" : "PROSPECT";
       return `[${c.created_at.slice(0, 10)}] ${who}: ${c.content?.trim() || "(no content)"}`;
     })
     .join("\n");

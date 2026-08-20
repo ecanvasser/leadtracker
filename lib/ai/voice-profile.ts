@@ -11,7 +11,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { getCommunicationHistory } from "@/lib/bonzo/client";
+import { getCommunicationHistory, isOutbound } from "@/lib/bonzo/client";
 import { callModel, type ModelUsage } from "@/lib/ai/models";
 import {
   VOICE_PROFILE_SCHEMA,
@@ -74,7 +74,7 @@ export async function collectOutboundMessages(
   const outbound: OutboundMessage[] = [];
   for (const history of histories) {
     for (const c of history) {
-      if (c.direction !== "outbound") continue;
+      if (!isOutbound(c.direction)) continue;
       const content = (c.content ?? "").trim();
       if (content.length < MIN_USEFUL_LENGTH) continue;
       outbound.push({ content, type: c.type, created_at: c.created_at });
@@ -180,7 +180,7 @@ export function exemplarsFor(
 ): string[] {
   return communications
     .filter(
-      (c) => c.direction === "outbound" && (c.content ?? "").trim().length >= MIN_USEFUL_LENGTH
+      (c) => isOutbound(c.direction) && (c.content ?? "").trim().length >= MIN_USEFUL_LENGTH
     )
     .slice(-limit)
     .map((c) => (c.content ?? "").trim());

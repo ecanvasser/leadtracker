@@ -14,6 +14,7 @@ import {
   type ApprovalCardInput,
 } from "@/lib/telegram/approval-card";
 import { getTelegramLink } from "@/lib/db/telegram";
+import { isInbound } from "@/lib/bonzo/client";
 import type { LeadState } from "@/lib/insights/lead-state";
 import type { LoanType } from "@/types/db";
 import {
@@ -70,7 +71,7 @@ export async function buildCardInput(
   }[];
 
   const lastInbound = [...comms]
-    .filter((c) => c.direction === "inbound" && (c.content ?? "").trim())
+    .filter((c) => isInbound(c.direction) && (c.content ?? "").trim())
     .sort(
       (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
     )[0];

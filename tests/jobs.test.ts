@@ -205,7 +205,8 @@ describe("refresh_cache cost guard", () => {
     const getProspect = vi.fn();
 
     vi.doMock("@/lib/insights/analyze", () => ({ analyzeProspect }));
-    vi.doMock("@/lib/bonzo/client", () => ({
+    vi.doMock("@/lib/bonzo/client", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/bonzo/client")>()),
       getCommunicationHistory,
       getProspectNotes,
       getProspect,
@@ -277,7 +278,8 @@ describe("refresh_cache cost guard", () => {
     }));
 
     vi.doMock("@/lib/insights/analyze", () => ({ analyzeProspect }));
-    vi.doMock("@/lib/bonzo/client", () => ({
+    vi.doMock("@/lib/bonzo/client", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/bonzo/client")>()),
       getCommunicationHistory: async () => [
         { created_at: "2026-08-21T10:00:00Z" },
       ],
@@ -339,7 +341,8 @@ describe("refresh_cache cost guard", () => {
   it("skips a lead that is no longer an enrolled hot lead, without any API call", async () => {
     const getCommunicationHistory = vi.fn();
     vi.doMock("@/lib/insights/analyze", () => ({ analyzeProspect: vi.fn() }));
-    vi.doMock("@/lib/bonzo/client", () => ({
+    vi.doMock("@/lib/bonzo/client", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/bonzo/client")>()),
       getCommunicationHistory,
       getProspectNotes: vi.fn(),
       getProspect: vi.fn(),

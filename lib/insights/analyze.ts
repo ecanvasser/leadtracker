@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { ANALYSIS_SYSTEM } from "@/lib/ai/prompts";
 import {
+  isOutbound,
   getMortgageFields,
   type BonzoProspect,
   type BonzoCommunication,
@@ -92,7 +93,7 @@ Pipeline Stage: ${prospect.pipeline_stage?.name || "N/A"}`;
     );
     const thread = sorted
       .map((c) => {
-        const dir = c.direction === "outbound" ? "OUTBOUND" : "INBOUND";
+        const dir = isOutbound(c.direction) ? "OUTBOUND" : "INBOUND";
         const content = c.content?.trim() || "(no content)";
         return `[${c.created_at}] ${dir} (${c.type}): ${content}`;
       })

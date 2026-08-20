@@ -13,6 +13,7 @@ import {
   getProspectNotes,
   getProspect,
   getMortgageFields,
+  isInbound,
   type BonzoCommunication,
   type BonzoProspect,
 } from "@/lib/bonzo/client";
@@ -194,7 +195,7 @@ export const refreshCache: JobHandler = async (supabase, job) => {
   // separately from last_message_at because an outbound send moves that
   // watermark, and a reply arriving afterwards would otherwise be missed.
   const newestInbound = newestMessageAt(
-    communications.filter((c) => c.direction === "inbound")
+    communications.filter((c) => isInbound(c.direction))
   );
   const previousInbound = cache?.last_inbound_at
     ? new Date(cache.last_inbound_at).getTime()
@@ -366,7 +367,7 @@ export const draftReply: JobHandler = async (supabase, job) => {
 
   const comms = (cache?.bonzo_communication ?? []) as BonzoCommunication[];
   const lastInbound = [...comms]
-    .filter((c) => c.direction === "inbound")
+    .filter((c) => isInbound(c.direction))
     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
 
   if (!lastInbound) {

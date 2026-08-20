@@ -456,3 +456,51 @@ describe("resolveCadenceConfig", () => {
     expect(resolveCadenceConfig({ blocked_min_days_between_touches: -5 }).blocked_min_days_between_touches).toBe(1);
   });
 });
+
+// Regression: Bonzo sends "incoming"/"outgoing". Every direction check was
+// written against "inbound"/"outbound" and matched nothing, so the score-1000
+// unanswered-reply signal never fired against real data. These use Bonzo's
+// actual vocabulary rather than the one the code assumed.
+describe("direction handling against Bonzo's real vocabulary", () => {
+  const opts = { timeZone: LA, now: THURSDAY_MORNING, config: DEFAULT_CADENCE_CONFIG };
+
+  function comm(overrides: Partial<BonzoCommEntry> = {}): BonzoCommEntry {
+    return {
+      id: 1,
+      content: "still interested?",
+      direction: "incoming",
+      type: "sms",
+      created_at: "2026-08-20T13:00:00Z",
+      ...overrides,
+    };
+  }
+
+  it("detects an unanswered reply from an 'incoming' message", () => {
+    const actions = calculateTodayActions(
+      contact({ created_at: "2026-07-31T16:00:00Z" }),
+      [],
+      [comm()],
+      opts
+    );
+
+    expect(actions.length).toBeGreaterThan(0);
+    expect(actions[0].priorityScore).toBe(1000);
+    expect(actions[0].priorityReason).toMatch(/reply/i);
+  });
+
+  it("does not treat an 'outgoing' message as an unanswered reply", () => {
+    const actions = calculateTodayActions(
+      contact({ created_at: "2026-07-31T16:00:00Z" }),
+      [],
+      [comm({ direction: "outgoing", content: "checking on docs" })],
+      opts
+    );
+
+    expect(actions.every((a) => a.priorityScore !== 1000)).toBe(true);
+  });
+
+  it("ranks a genuine reply above even a Day 0 lead's cadence", () => {
+    const actions = calculateTodayActions(contact(), [], [comm()], opts);
+    expect(actions[0].priorityScore).toBe(1000);
+  });
+});

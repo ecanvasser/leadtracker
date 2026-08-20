@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   getMortgageFields,
   isOptedOut,
+  isInbound,
+  isOutbound,
   sendSms,
   sendEmail,
   BonzoSendRejectedError,
@@ -214,5 +216,43 @@ describe("sendSms / sendEmail", () => {
   it("raises a rate-limit error on 429 so the caller can reschedule", async () => {
     stubFetch({ status: 429, headers: { "retry-after": "120" }, body: {} });
     await expect(sendSms(1, "hi")).rejects.toThrow(BonzoRateLimitError);
+  });
+});
+
+// Bonzo returns "incoming"/"outgoing". The codebase was written against
+// "inbound"/"outbound", which Bonzo has never sent — so every direction check
+// silently matched nothing against real data.
+describe("isInbound / isOutbound", () => {
+  it("recognises the words Bonzo actually sends", () => {
+    expect(isInbound("incoming")).toBe(true);
+    expect(isOutbound("outgoing")).toBe(true);
+  });
+
+  it("still recognises the inbound/outbound vocabulary", () => {
+    // insights_cache holds historical payloads that may use either.
+    expect(isInbound("inbound")).toBe(true);
+    expect(isOutbound("outbound")).toBe(true);
+  });
+
+  it("is case and whitespace insensitive", () => {
+    expect(isInbound("  INCOMING ")).toBe(true);
+    expect(isOutbound("Outgoing")).toBe(true);
+  });
+
+  it("keeps the two directions mutually exclusive", () => {
+    expect(isOutbound("incoming")).toBe(false);
+    expect(isInbound("outgoing")).toBe(false);
+  });
+
+  it("treats an unknown direction as neither", () => {
+    // Guessing would put a prospect's words into the broker's voice profile.
+    expect(isInbound("sideways")).toBe(false);
+    expect(isOutbound("sideways")).toBe(false);
+  });
+
+  it("handles null and undefined", () => {
+    expect(isInbound(null)).toBe(false);
+    expect(isOutbound(undefined)).toBe(false);
+    expect(isInbound("")).toBe(false);
   });
 });

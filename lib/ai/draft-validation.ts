@@ -17,7 +17,7 @@ import {
   type DraftContext,
   type Violation,
 } from "@/lib/ai/validate";
-import { getMortgageFields } from "@/lib/bonzo/client";
+import { getMortgageFields, isOutbound } from "@/lib/bonzo/client";
 
 export interface DraftValidationOutcome {
   violations: Violation[];
@@ -67,7 +67,7 @@ export function hasIntroducedSelf(
   const needleCompany = brokerCompany.toLowerCase();
 
   return communications.some((c) => {
-    if (c.direction !== "outbound") return false;
+    if (!isOutbound(c.direction)) return false;
     const text = (c.content ?? "").toLowerCase();
     return text.includes(needleName) || text.includes(needleCompany);
   });

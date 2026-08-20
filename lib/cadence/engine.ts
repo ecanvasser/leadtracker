@@ -1,4 +1,5 @@
 import { Contact } from "@/types/db";
+import { isInbound, isOutbound } from "@/lib/bonzo/client";
 import {
   DEFAULT_TIMEZONE,
   addLocalDays,
@@ -142,8 +143,8 @@ export function consecutiveUnanswered(comms: BonzoCommEntry[]): number {
   );
   let count = 0;
   for (const c of sorted) {
-    if (c.direction === "inbound") break;
-    if (c.direction === "outbound") count++;
+    if (isInbound(c.direction)) break;
+    if (isOutbound(c.direction)) count++;
   }
   return count;
 }
@@ -156,7 +157,7 @@ export function daysSinceLastTouch(
 ): number | null {
   const times = [
     ...history.filter((e) => e.status !== "skipped").map((e) => e.created_at),
-    ...comms.filter((c) => c.direction === "outbound").map((c) => c.created_at),
+    ...comms.filter((c) => isOutbound(c.direction)).map((c) => c.created_at),
   ]
     .map((t) => new Date(t).getTime())
     .filter((t) => Number.isFinite(t));
@@ -220,7 +221,7 @@ function detectUnansweredReply(
   );
 
   const lastMsg = sorted[0];
-  if (lastMsg.direction === "inbound") {
+  if (isInbound(lastMsg.direction)) {
     const diffHours = Math.round(
       (ctx.now.getTime() - new Date(lastMsg.created_at).getTime()) / 3_600_000
     );

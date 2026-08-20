@@ -15,7 +15,12 @@
  */
 
 import { callModel, type ModelUsage } from "@/lib/ai/models";
-import { getMortgageFields, type BonzoProspect } from "@/lib/bonzo/client";
+import {
+  getMortgageFields,
+  isInbound,
+  isOutbound,
+  type BonzoProspect,
+} from "@/lib/bonzo/client";
 
 export const LEAD_TEMPS = [
   "in_market",
@@ -278,7 +283,7 @@ function buildClassifyMessage(input: ClassifyInput): string {
     );
     const thread = sorted
       .map((c) => {
-        const who = c.direction === "outbound" ? "BROKER" : "PROSPECT";
+        const who = isOutbound(c.direction) ? "BROKER" : "PROSPECT";
         return `[${c.created_at.slice(0, 10)}] ${who}: ${c.content?.trim() || "(no content)"}`;
       })
       .join("\n");
@@ -330,9 +335,9 @@ export function withObservedTimestamps(
   state: LeadState,
   communications: { direction: string; created_at: string }[]
 ): LeadState {
-  const latest = (direction: string): string | null => {
+  const latest = (match: (d: string) => boolean): string | null => {
     const times = communications
-      .filter((c) => c.direction === direction)
+      .filter((c) => match(c.direction))
       .map((c) => new Date(c.created_at).getTime())
       .filter((t) => Number.isFinite(t));
     if (times.length === 0) return null;
@@ -341,7 +346,7 @@ export function withObservedTimestamps(
 
   return {
     ...state,
-    last_inbound_at: latest("inbound"),
-    last_outbound_at: latest("outbound"),
+    last_inbound_at: latest(isInbound),
+    last_outbound_at: latest(isOutbound),
   };
 }

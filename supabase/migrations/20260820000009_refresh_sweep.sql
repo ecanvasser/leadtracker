@@ -25,11 +25,18 @@ alter table insights_cache
 
 -- Set the initial watermark from what is already cached, so enabling this does
 -- not treat every historical reply as new and push a card for each.
+--
+-- Bonzo writes "incoming"/"outgoing", not "inbound"/"outbound". Matching only
+-- the latter would leave every watermark NULL, and the first sweep would then
+-- treat every historical reply as new — a burst of approval cards for
+-- conversations that are months old, plus a classification and a draft for
+-- each. Both vocabularies are accepted because cached payloads may predate
+-- the normalisation in lib/bonzo/client.ts.
 update insights_cache
 set last_inbound_at = (
   select max((m ->> 'created_at')::timestamptz)
   from jsonb_array_elements(bonzo_communication) as m
-  where m ->> 'direction' = 'inbound'
+  where lower(m ->> 'direction') in ('incoming', 'inbound', 'in', 'received')
 )
 where last_inbound_at is null
   and bonzo_communication is not null

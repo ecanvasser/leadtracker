@@ -162,3 +162,25 @@ describe("validateProfileShape", () => {
     expect(validateProfileShape(bad).join()).toContain("never_uses");
   });
 });
+
+// Same regression as the cadence engine: style exemplars filtered on
+// "outbound", which Bonzo never sends, so no exemplar was ever selected and
+// every draft went out without the verbatim examples the spec calls for.
+describe("exemplars against Bonzo's real vocabulary", () => {
+  const comms = [
+    { content: "Hey Dana, I pulled the numbers on the cash-out.", direction: "outgoing" },
+    { content: "great, what do they look like?", direction: "incoming" },
+    { content: "Sending the breakdown over now.", direction: "outgoing" },
+  ];
+
+  it("selects outbound messages Bonzo labelled 'outgoing'", () => {
+    const out = exemplarsFor(comms);
+    expect(out).toHaveLength(2);
+    expect(out[0]).toContain("pulled the numbers");
+  });
+
+  it("excludes the prospect's own words from the broker's exemplars", () => {
+    // Including these would teach the model to imitate the prospect.
+    expect(exemplarsFor(comms).join(" ")).not.toContain("what do they look like");
+  });
+});

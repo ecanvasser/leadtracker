@@ -194,6 +194,31 @@ export function isOptedOut(
   return outs.some((o) => o.includes("call") || o.includes("voice"));
 }
 
+/**
+ * Message direction, normalised.
+ *
+ * Bonzo returns "incoming" and "outgoing". The codebase was written against
+ * "inbound"/"outbound", which Bonzo has never sent — so every direction check
+ * silently matched nothing. That made detectUnansweredReply (the score-1000
+ * signal), style exemplars, the "has he introduced himself" check and the
+ * whole inbound-reply flow dead code against real data.
+ *
+ * Both vocabularies are accepted: fresh API responses use Bonzo's words, and
+ * insights_cache holds historical payloads that may use either. Anything
+ * unrecognised is neither — guessing would put a prospect's words into the
+ * broker's voice profile.
+ */
+const INBOUND_WORDS = new Set(["incoming", "inbound", "in", "received"]);
+const OUTBOUND_WORDS = new Set(["outgoing", "outbound", "out", "sent"]);
+
+export function isInbound(direction: string | null | undefined): boolean {
+  return INBOUND_WORDS.has(String(direction ?? "").trim().toLowerCase());
+}
+
+export function isOutbound(direction: string | null | undefined): boolean {
+  return OUTBOUND_WORDS.has(String(direction ?? "").trim().toLowerCase());
+}
+
 export interface BonzoCommunication {
   id: number;
   content: string | null;
