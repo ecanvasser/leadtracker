@@ -11,7 +11,13 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { enqueueJob } from "@/lib/jobs/queue";
-import { getNotificationWindows, isWithinLocalWindow } from "@/lib/time";
+import {
+  getNotificationWindows,
+  isWithinLocalWindow,
+  localDate,
+  localMinutesSinceMidnight,
+  parseTimeToMinutes,
+} from "@/lib/time";
 
 /** Leads are swept at most this often, regardless of tick frequency. */
 export const REFRESH_SWEEP_INTERVAL_MS = 15 * 60 * 1000;
@@ -105,6 +111,49 @@ export async function sweepRefreshJobs(
 }
 
 /**
+ * Enqueues the morning digest once the local clock has passed the configured
+ * time and today's digest has not gone out.
+ *
+ * The due check lives here, alongside the timezone, rather than in a cron
+ * expression that would have to guess at the zone.
+ */
+export async function enqueueDigestIfDue(
+  supabase: SupabaseClient,
+  userId: string,
+  now: Date = new Date()
+): Promise<{ enqueued: boolean; reason?: string }> {
+  const { data: settings } = await supabase
+    .from("user_settings")
+    .select("timezone, morning_digest_time, last_digest_date")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (!settings) return { enqueued: false, reason: "no settings" };
+
+  const timeZone = settings.timezone ?? "America/Los_Angeles";
+  const today = localDate(now, timeZone);
+
+  if (settings.last_digest_date === today) {
+    return { enqueued: false, reason: "already sent today" };
+  }
+
+  const nowMinutes = localMinutesSinceMidnight(now, timeZone);
+  const digestMinutes = parseTimeToMinutes(settings.morning_digest_time ?? "08:00");
+
+  if (nowMinutes < digestMinutes) {
+    return { enqueued: false, reason: "before digest time" };
+  }
+
+  // A tick that first runs long after the digest time still sends it — better
+  // a late digest than none. It cannot repeat, because last_digest_date is
+  // claimed by the handler before sending.
+  const created = await enqueueJob(supabase, { userId, jobType: "morning_digest" });
+  return created
+    ? { enqueued: true }
+    : { enqueued: false, reason: "already queued" };
+}
+
+/**
  * Sweeps every linked user.
  *
  * Iterates users rather than assuming one, because the timezone gating already
@@ -119,6 +168,7 @@ export async function sweepAllUsers(
   const out: Record<string, SweepResult> = {};
   for (const u of users ?? []) {
     try {
+      await enqueueDigestIfDue(supabase, u.user_id, now);
       out[u.user_id] = await sweepRefreshJobs(supabase, u.user_id, now);
     } catch (e) {
       console.error(`[jobs/enqueue] sweep failed for ${u.user_id}:`, e);

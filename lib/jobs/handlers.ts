@@ -419,6 +419,46 @@ export const draftReply: JobHandler = async (supabase, job) => {
   };
 };
 
+/**
+ * morning_digest — the day's opening summary.
+ *
+ * Enqueued by the sweep once the local clock passes the configured time. The
+ * job is the delivery mechanism only; whether it is due is decided in
+ * lib/jobs/enqueue.ts, where the timezone already lives.
+ */
+export const morningDigest: JobHandler = async (supabase, job) => {
+  const userId = job.user_id;
+  const timeZone = await getUserTimezone(userId);
+  const today = localDate(new Date(), timeZone);
+
+  // Idempotency: a retry after a partial failure must not send a second
+  // digest. The date is claimed before sending.
+  const { data: settings } = await supabase
+    .from("user_settings")
+    .select("last_digest_date")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (settings?.last_digest_date === today) {
+    return { summary: "digest already sent today", usedModel: false };
+  }
+
+  await supabase
+    .from("user_settings")
+    .update({ last_digest_date: today })
+    .eq("user_id", userId);
+
+  const { sendMorningDigest } = await import("@/lib/telegram/digest");
+  const result = await sendMorningDigest(supabase, userId, today);
+
+  return {
+    summary: result.sent
+      ? `digest sent (${result.total} queued)`
+      : `digest not sent: ${result.reason}`,
+    usedModel: false,
+  };
+};
+
 /** Marker used to find an existing reply item on retry. */
 export const INBOUND_REPLY_REASON = "They replied — respond";
 
@@ -432,4 +472,5 @@ export const INBOUND_REPLY_REASON = "They replied — respond";
 export const handlers: Partial<Record<Job["job_type"], JobHandler>> = {
   refresh_cache: refreshCache,
   draft_reply: draftReply,
+  morning_digest: morningDigest,
 };

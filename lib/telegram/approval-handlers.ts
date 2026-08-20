@@ -27,6 +27,7 @@ import {
   type SnoozeOption,
 } from "@/lib/telegram/approval-card";
 import { buildCardInput, pushNextCard, releaseCard } from "@/lib/telegram/push";
+import { DIGEST_START, handleDigestStart } from "@/lib/telegram/digest";
 import { addLocalDays, getUserTimezone, localDate } from "@/lib/time";
 import type { SessionData } from "@/lib/telegram/session";
 
@@ -119,10 +120,25 @@ export async function handleApprovalCallback(
   const data = ctx.callbackQuery?.data;
   if (!data || !ctx.from) return false;
 
+  const supabase = createServiceClient();
+
+  // The digest's Start button carries no queue item id.
+  if (data === DIGEST_START) {
+    const digestUser = await getUserIdByTelegramId(supabase, ctx.from.id);
+    if (!digestUser) {
+      await ctx.answerCallbackQuery({ text: "Not linked to an account." });
+      return true;
+    }
+    await ctx.answerCallbackQuery();
+    const problem = await handleDigestStart(supabase, digestUser);
+    if (problem) await ctx.reply(problem);
+    else await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } });
+    return true;
+  }
+
   const parsed = parseCallback(data);
   if (!parsed || !KNOWN_CODES.has(parsed.code)) return false;
 
-  const supabase = createServiceClient();
   const userId = await getUserIdByTelegramId(supabase, ctx.from.id);
   if (!userId) {
     await ctx.answerCallbackQuery({ text: "Not linked to an account." });

@@ -20,6 +20,7 @@ export const JOB_TYPES = [
   "classify_lead",
   "draft_reply",
   "extract_call_time",
+  "morning_digest",
 ] as const;
 
 export type JobType = (typeof JOB_TYPES)[number];
