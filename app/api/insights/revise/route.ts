@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/service";
 import Anthropic from "@anthropic-ai/sdk";
 
 export async function POST(request: NextRequest) {
@@ -9,7 +10,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { drafts, instructions } = await request.json();
+  const userId = authData.claims.sub as string;
+  const { drafts, instructions, contactId } = await request.json();
 
   if (!drafts || !instructions?.trim()) {
     return NextResponse.json(
@@ -51,6 +53,39 @@ Respond ONLY with a JSON array of objects, each with "channel" (sms or email), "
       .trim();
 
     const revised = JSON.parse(cleaned);
+
+    // Persist the revision. Without this the new drafts lived only in React
+    // state and vanished on navigation, so the next page load showed the
+    // original text as if the revision had never happened.
+    if (contactId) {
+      const serviceClient = createServiceClient();
+      const { data: cache } = await serviceClient
+        .from("insights_cache")
+        .select("ai_analysis")
+        .eq("contact_id", contactId)
+        .eq("user_id", userId)
+        .maybeSingle();
+
+      if (cache?.ai_analysis) {
+        const updated = {
+          ...(cache.ai_analysis as Record<string, unknown>),
+          draft_messages: revised,
+        };
+        const { error: persistErr } = await serviceClient
+          .from("insights_cache")
+          .update({ ai_analysis: updated })
+          .eq("contact_id", contactId)
+          .eq("user_id", userId);
+
+        if (persistErr) {
+          // Surface rather than silently returning drafts that were not saved.
+          return NextResponse.json(
+            { error: `Revised, but could not save: ${persistErr.message}` },
+            { status: 500 }
+          );
+        }
+      }
+    }
 
     return NextResponse.json({ drafts: revised });
   } catch (e) {

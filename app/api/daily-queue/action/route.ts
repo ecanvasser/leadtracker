@@ -42,12 +42,20 @@ export async function POST(request: NextRequest) {
     done: "done",
   };
 
+  // An edited message is the message that was actually sent, so it becomes the
+  // row's draft_message. Previously the edit only reached outreach_log and the
+  // queue row still showed the original draft.
+  const queueUpdate: Record<string, unknown> = {
+    status: statusMap[action],
+    completed_at: new Date().toISOString(),
+  };
+  if (action === "edit_send" && typeof editedMessage === "string" && editedMessage.trim()) {
+    queueUpdate.draft_message = editedMessage;
+  }
+
   await serviceClient
     .from("daily_queue")
-    .update({
-      status: statusMap[action],
-      completed_at: new Date().toISOString(),
-    })
+    .update(queueUpdate)
     .eq("id", queueItemId);
 
   const outreachStatus = action === "skip" ? "skipped" : "sent";
