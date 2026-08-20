@@ -315,7 +315,7 @@ async function applySnooze(
 ): Promise<void> {
   await ctx.answerCallbackQuery();
 
-  const timeZone = await getUserTimezone(userId);
+  const timeZone = await getUserTimezone(userId, supabase);
   const until = snoozeUntil(option, new Date(), timeZone);
 
   // Snooze stays pending on purpose — it is "not right now", not "not this",

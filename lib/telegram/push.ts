@@ -82,7 +82,10 @@ export async function buildCardInput(
     queueItemId: item.id,
     contactName: contact.name,
     loanType: contact.loan_type as LoanType,
-    leadAgeDays: leadAgeDays(contact.created_at, await getUserTimezone(contact.user_id)),
+    leadAgeDays: leadAgeDays(
+      contact.created_at,
+      await getUserTimezone(contact.user_id, supabase)
+    ),
     actionType: item.action_type as "sms" | "email" | "call",
     draftMessage: item.draft_message,
     emailSubject: item.email_subject,

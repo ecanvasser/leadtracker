@@ -102,7 +102,7 @@ export async function pushCallConfirmation(
 
   if (!contact) return false;
 
-  const brokerZone = await getUserTimezone(userId);
+  const brokerZone = await getUserTimezone(userId, supabase);
   const bot = createBot();
 
   await bot.api.sendMessage(
@@ -165,7 +165,7 @@ export async function handleCallCallback(
         .from("scheduled_calls")
         .update({ status: "confirmed" })
         .eq("id", callId);
-      const brokerZone = await getUserTimezone(userId);
+      const brokerZone = await getUserTimezone(userId, supabase);
       return `✅ Confirmed — ${formatBothZones(
         new Date(call.scheduled_at),
         call.prospect_timezone,

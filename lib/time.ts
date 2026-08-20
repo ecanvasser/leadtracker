@@ -333,6 +333,10 @@ export async function getUserTimezone(
   const hit = timezoneCache.get(userId);
   if (hit && Date.now() - hit.at < TIMEZONE_TTL_MS) return hit.tz;
 
+  // Callers that already hold a client must pass it: constructing a second one
+  // here duplicates the connection and, worse, makes the caller depend on env
+  // vars rather than on the client it was handed. The fallback exists only for
+  // entry points that genuinely have no client yet.
   const supabase = client ?? createServiceClient();
   const { data } = await supabase
     .from("user_settings")

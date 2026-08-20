@@ -393,7 +393,7 @@ export const draftReply: JobHandler = async (supabase, job) => {
     return { summary: "not an enrolled hot lead", usedModel: false };
   }
 
-  const timeZone = await getUserTimezone(contact.user_id);
+  const timeZone = await getUserTimezone(contact.user_id, supabase);
   const today = localDate(new Date(), timeZone);
 
   // Idempotency: a retry must not create a second card for the same reply.
@@ -487,7 +487,7 @@ export const draftReply: JobHandler = async (supabase, job) => {
  */
 export const morningDigest: JobHandler = async (supabase, job) => {
   const userId = job.user_id;
-  const timeZone = await getUserTimezone(userId);
+  const timeZone = await getUserTimezone(userId, supabase);
   const today = localDate(new Date(), timeZone);
 
   // Idempotency: a retry after a partial failure must not send a second

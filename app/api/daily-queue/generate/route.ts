@@ -96,7 +96,7 @@ export async function POST(request: NextRequest) {
   // "Today" is the broker's local day, resolved once and reused everywhere
   // below. Computing it per-query with toISOString() rolled the queue over at
   // 5 PM Pacific and silently discarded the afternoon block.
-  const timeZone = await getUserTimezone(userId);
+  const timeZone = await getUserTimezone(userId, serviceClient);
   const todayStr = localDate(new Date(), timeZone);
 
   // Broker identity and voice profile drive both the prompt and the validator,
