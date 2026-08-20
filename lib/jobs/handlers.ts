@@ -21,6 +21,7 @@ import type { Job } from "@/lib/jobs/queue";
 import type { BonzoCommEntry } from "@/lib/cadence/engine";
 import { classifyLeadState, type LeadState } from "@/lib/insights/lead-state";
 import { getUserTimezone, localDate, leadAgeDays } from "@/lib/time";
+import { enqueueJob } from "@/lib/jobs/queue";
 import { generateDrafts, type PendingAction } from "@/lib/ai/draft";
 import { resolveCadenceConfig } from "@/lib/cadence/config";
 import { planLead } from "@/lib/cadence/engine";
@@ -101,7 +102,7 @@ export const refreshCache: JobHandler = async (supabase, job) => {
 
   const { data: cache } = await supabase
     .from("insights_cache")
-    .select("ai_analysis, last_message_at, bonzo_prospect_data, lead_state")
+    .select("ai_analysis, last_message_at, last_inbound_at, bonzo_prospect_data, lead_state")
     .eq("contact_id", contactId)
     .maybeSingle();
 
@@ -189,6 +190,19 @@ export const refreshCache: JobHandler = async (supabase, job) => {
     return [] as AiAnalysis["draft_messages"];
   });
 
+  // An inbound reply is the highest-value signal in the system. It is tracked
+  // separately from last_message_at because an outbound send moves that
+  // watermark, and a reply arriving afterwards would otherwise be missed.
+  const newestInbound = newestMessageAt(
+    communications.filter((c) => c.direction === "inbound")
+  );
+  const previousInbound = cache?.last_inbound_at
+    ? new Date(cache.last_inbound_at).getTime()
+    : null;
+  const hasNewInbound =
+    newestInbound !== null &&
+    (previousInbound === null || newestInbound.getTime() > previousInbound);
+
   const { error: upsertErr } = await supabase.from("insights_cache").upsert(
     {
       contact_id: contactId,
@@ -205,10 +219,22 @@ export const refreshCache: JobHandler = async (supabase, job) => {
       generated_at: new Date().toISOString(),
       last_synced_at: new Date().toISOString(),
       last_message_at: newest ? newest.toISOString() : null,
+      last_inbound_at: newestInbound ? newestInbound.toISOString() : null,
     },
     { onConflict: "contact_id" }
   );
   if (upsertErr) throw upsertErr;
+
+  // Follow-on work, enqueued rather than done inline so this handler stays
+  // short and the reply path is retried on its own if drafting fails.
+  if (hasNewInbound) {
+    await enqueueJob(supabase, {
+      userId: contact.user_id,
+      contactId: contactId,
+      jobType: "draft_reply",
+      payload: { triggered_by: "inbound_reply" },
+    });
+  }
 
   return {
     summary:
@@ -216,21 +242,13 @@ export const refreshCache: JobHandler = async (supabase, job) => {
       (classification
         ? `; ${classification.state.lead_temp}/${classification.state.blocker} ` +
           `-> ${classification.state.recommended_action}`
-        : "; classification failed"),
+        : "; classification failed") +
+      (hasNewInbound ? "; new inbound reply, queued a response" : ""),
     usedModel: true,
   };
 };
 
-/**
- * Registry.
- *
- * Types declared in the schema but not yet implemented are absent here on
- * purpose — the worker parks an unknown type as failed with a clear error
- * rather than silently dropping it.
- */
-export const handlers: Partial<Record<Job["job_type"], JobHandler>> = {
-  refresh_cache: refreshCache,
-};
+
 
 /**
  * Produces the contact page's suggested messages through the shared drafting
@@ -297,3 +315,121 @@ async function draftsForContactPage(input: {
       body: d.draft_message as string,
     }));
 }
+
+/**
+ * draft_reply — a prospect replied, so draft a response and push it.
+ *
+ * This is the flow the whole system is built around. A reply should feel
+ * near-real-time rather than being batched into tomorrow's queue, so it
+ * creates its own queue item at top priority and pushes the card immediately
+ * instead of waiting for the morning run.
+ */
+export const draftReply: JobHandler = async (supabase, job) => {
+  const contactId = job.contact_id;
+  if (!contactId) throw new Error("draft_reply requires a contact_id");
+
+  const { data: contact } = await supabase
+    .from("contacts")
+    .select("id, user_id, name, stage, insights_enabled, bonzo_prospect_id, created_at")
+    .eq("id", contactId)
+    .maybeSingle();
+
+  if (!contact) return { summary: "contact gone", usedModel: false };
+  if (!contact.insights_enabled || contact.stage !== "hot_lead") {
+    return { summary: "not an enrolled hot lead", usedModel: false };
+  }
+
+  const timeZone = await getUserTimezone(contact.user_id);
+  const today = localDate(new Date(), timeZone);
+
+  // Idempotency: a retry must not create a second card for the same reply.
+  const { data: existing } = await supabase
+    .from("daily_queue")
+    .select("id, status")
+    .eq("contact_id", contactId)
+    .eq("queue_date", today)
+    .eq("priority_reason", INBOUND_REPLY_REASON)
+    .maybeSingle();
+
+  if (existing) {
+    return {
+      summary: `reply item already exists (${existing.status})`,
+      usedModel: false,
+    };
+  }
+
+  const { data: cache } = await supabase
+    .from("insights_cache")
+    .select("lead_state, bonzo_communication, bonzo_prospect_data")
+    .eq("contact_id", contactId)
+    .maybeSingle();
+
+  const comms = (cache?.bonzo_communication ?? []) as BonzoCommunication[];
+  const lastInbound = [...comms]
+    .filter((c) => c.direction === "inbound")
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
+
+  if (!lastInbound) {
+    return { summary: "no inbound message to reply to", usedModel: false };
+  }
+
+  // Channel mirrors how they reached out. Replying to a text with an email
+  // reads as evasion.
+  const channel: "sms" | "email" =
+    (lastInbound.type ?? "").toLowerCase().includes("email") ? "email" : "sms";
+
+  const { data: inserted, error: insertErr } = await supabase
+    .from("daily_queue")
+    .insert({
+      user_id: contact.user_id,
+      contact_id: contactId,
+      queue_date: today,
+      // Above everything else in the day. An unanswered reply outranks any
+      // scheduled touch.
+      priority_rank: 0,
+      priority_reason: INBOUND_REPLY_REASON,
+      action_type: channel,
+      status: "pending",
+      lane: "inbound_reply",
+      decision_trace: {
+        lane: "inbound_reply",
+        rule_fired: "inbound_reply_detected",
+        replied_at: lastInbound.created_at,
+      },
+    })
+    .select("id")
+    .single();
+
+  if (insertErr) throw insertErr;
+
+  // Draft through the shared path so the reply is held to the same
+  // constraints as everything else.
+  const { draftSingleQueueItem } = await import("@/lib/ai/draft-one");
+  const drafted = await draftSingleQueueItem(supabase, contact.user_id, inserted.id);
+
+  const { pushCard } = await import("@/lib/telegram/push");
+  const push = await pushCard(supabase, contact.user_id, inserted.id);
+
+  return {
+    summary:
+      `drafted a ${channel} reply for ${contact.name}` +
+      (drafted.validated ? "" : " (unvalidated)") +
+      (push.pushed ? "; pushed" : `; not pushed (${push.reason})`),
+    usedModel: true,
+  };
+};
+
+/** Marker used to find an existing reply item on retry. */
+export const INBOUND_REPLY_REASON = "They replied — respond";
+
+/**
+ * Registry.
+ *
+ * Types declared in the schema but not yet implemented are absent here on
+ * purpose — the worker parks an unknown type as failed with a clear error
+ * rather than silently dropping it.
+ */
+export const handlers: Partial<Record<Job["job_type"], JobHandler>> = {
+  refresh_cache: refreshCache,
+  draft_reply: draftReply,
+};

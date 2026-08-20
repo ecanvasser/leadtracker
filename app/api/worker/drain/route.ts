@@ -24,6 +24,7 @@ import {
   countRunnableJobs,
   type Job,
 } from "@/lib/jobs/queue";
+import { sweepAllUsers } from "@/lib/jobs/enqueue";
 import { handlers } from "@/lib/jobs/handlers";
 import { BonzoRateLimitError } from "@/lib/bonzo/client";
 
@@ -98,6 +99,15 @@ export async function POST(request: NextRequest) {
     await reapTelegramSessions(supabase);
   } catch (e) {
     console.error("[worker/drain] session reap failed:", e);
+  }
+
+  // Decide what is due before claiming. Usually nothing: the tick fires every
+  // 5 minutes and leads are swept every 15, inside working hours only.
+  let sweeps: Record<string, unknown> = {};
+  try {
+    sweeps = await sweepAllUsers(supabase);
+  } catch (e) {
+    console.error("[worker/drain] sweep failed:", e);
   }
 
   let jobs: Job[];
@@ -198,6 +208,7 @@ export async function POST(request: NextRequest) {
   return NextResponse.json({
     claimed: jobs.length,
     reaped,
+    sweeps,
     remaining,
     chained,
     chainDepth,
