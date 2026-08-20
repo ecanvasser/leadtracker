@@ -3,6 +3,10 @@ import { createServiceClient } from "@/lib/supabase/service";
 import { getUserIdByTelegramId, redeemLinkToken } from "@/lib/db/telegram";
 import { withSession, type SessionData } from "@/lib/telegram/session";
 import {
+  handleApprovalCallback,
+  handleApprovalText,
+} from "@/lib/telegram/approval-handlers";
+import {
   getAllContacts,
   createContact,
   updateContact,
@@ -267,6 +271,10 @@ export async function handleDelete(ctx: Context) {
 async function callbackFlow(ctx: Context, session: SessionData, clear: Clear) {
   const data = ctx.callbackQuery?.data;
   if (!data || !ctx.from) return;
+
+  // Approval-card callbacks answer themselves and must be matched before the
+  // contact-management flows below, which claim broad prefixes.
+  if (await handleApprovalCallback(ctx, session)) return;
   await ctx.answerCallbackQuery();
 
   const supabase = createServiceClient();
@@ -445,6 +453,9 @@ async function callbackFlow(ctx: Context, session: SessionData, clear: Clear) {
 
 async function textFlow(ctx: Context, session: SessionData, clear: Clear) {
   if (!ctx.from || !ctx.message?.text) return;
+
+  // Replies that follow Edit or Redraft on an approval card.
+  if (await handleApprovalText(ctx, session, clear)) return;
 
   if (!session.action) return;
 

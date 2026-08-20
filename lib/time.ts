@@ -361,3 +361,66 @@ export async function localDateFor(
     : await getUserTimezone(userIdOrTz, client);
   return localDate(now, tz);
 }
+
+/**
+ * The user's push and send windows, read from user_settings.
+ *
+ * Quiet hours gate notifications to the broker. Working hours gate outbound
+ * work — polling, drafting, and sends. They are separate on purpose: the
+ * broker may want a digest before the hour at which he wants messages leaving
+ * for prospects.
+ */
+export interface NotificationWindows {
+  timeZone: string;
+  quietStart: string;
+  quietEnd: string;
+  workStart: string;
+  workEnd: string;
+}
+
+export async function getNotificationWindows(
+  userId: string,
+  client?: SupabaseLike
+): Promise<NotificationWindows> {
+  const supabase = client ?? createServiceClient();
+  const { data } = await supabase
+    .from("user_settings")
+    .select(
+      "timezone, quiet_hours_start, quiet_hours_end, working_hours_start, working_hours_end"
+    )
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  return {
+    timeZone: safeTimezone(data?.timezone),
+    quietStart: data?.quiet_hours_start ?? "21:00",
+    quietEnd: data?.quiet_hours_end ?? "08:00",
+    workStart: data?.working_hours_start ?? "08:00",
+    workEnd: data?.working_hours_end ?? "19:00",
+  };
+}
+
+/**
+ * Whether now falls inside the broker's quiet hours.
+ *
+ * Quiet hours normally wrap midnight (21:00 to 08:00), which is exactly the
+ * case isWithinLocalWindow handles.
+ */
+export async function isWithinQuietHours(
+  userId: string,
+  instant: Date = new Date(),
+  client?: SupabaseLike
+): Promise<boolean> {
+  const w = await getNotificationWindows(userId, client);
+  return isWithinLocalWindow(w.quietStart, w.quietEnd, instant, w.timeZone);
+}
+
+/** Whether now falls inside the broker's working hours. */
+export async function isWithinWorkingHours(
+  userId: string,
+  instant: Date = new Date(),
+  client?: SupabaseLike
+): Promise<boolean> {
+  const w = await getNotificationWindows(userId, client);
+  return isWithinLocalWindow(w.workStart, w.workEnd, instant, w.timeZone);
+}
