@@ -6,20 +6,73 @@ function getToken(): string {
   return token;
 }
 
-async function bonzoFetch(path: string): Promise<Response> {
+/**
+ * Thrown on a 429 so callers can reschedule rather than burn a retry attempt.
+ * Bonzo's OpenAPI document does not state a rate limit, so `retryAfterMs`
+ * falls back to a conservative default when no Retry-After header is sent.
+ */
+export class BonzoRateLimitError extends Error {
+  readonly retryAfterMs: number;
+  constructor(retryAfterMs: number) {
+    super(`Bonzo rate limit hit; retry in ${Math.round(retryAfterMs / 1000)}s`);
+    this.name = "BonzoRateLimitError";
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+/** Thrown for a 4xx that will never succeed on retry. */
+export class BonzoRequestError extends Error {
+  readonly status: number;
+  readonly body: string;
+  constructor(status: number, statusText: string, body: string) {
+    super(`Bonzo API error: ${status} ${statusText}${body ? ` — ${body}` : ""}`);
+    this.name = "BonzoRequestError";
+    this.status = status;
+    this.body = body;
+  }
+}
+
+const DEFAULT_RETRY_AFTER_MS = 60_000;
+
+interface BonzoFetchInit {
+  method?: string;
+  body?: unknown;
+}
+
+async function bonzoFetch(
+  path: string,
+  init: BonzoFetchInit = {}
+): Promise<Response> {
+  const hasBody = init.body !== undefined;
   const res = await fetch(`${BASE_URL}${path}`, {
+    method: init.method ?? "GET",
     headers: {
       Authorization: `Bearer ${getToken()}`,
       Accept: "application/json",
+      ...(hasBody ? { "Content-Type": "application/json" } : {}),
     },
+    ...(hasBody ? { body: JSON.stringify(init.body) } : {}),
   });
 
   if (res.status === 401) {
     throw new Error("Bonzo authentication failed — check your API token");
   }
 
+  if (res.status === 429) {
+    const header = res.headers.get("retry-after");
+    const seconds = header ? Number(header) : NaN;
+    throw new BonzoRateLimitError(
+      Number.isFinite(seconds) && seconds > 0
+        ? seconds * 1000
+        : DEFAULT_RETRY_AFTER_MS
+    );
+  }
+
   if (!res.ok) {
-    throw new Error(`Bonzo API error: ${res.status} ${res.statusText}`);
+    // Read the body — Bonzo returns 422 validation detail that is otherwise
+    // lost, and a silently swallowed send failure is the worst outcome here.
+    const body = await res.text().catch(() => "");
+    throw new BonzoRequestError(res.status, res.statusText, body.slice(0, 500));
   }
 
   return res;
