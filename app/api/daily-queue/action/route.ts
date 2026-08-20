@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
 import { localDateFor } from "@/lib/time";
+import { sendQueueItem, SendRefusedError } from "@/lib/outreach/send";
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
@@ -11,7 +12,7 @@ export async function POST(request: NextRequest) {
   }
 
   const userId = authData.claims.sub as string;
-  const { queueItemId, action, editedMessage } = await request.json();
+  const { queueItemId, action, editedMessage, editedSubject } = await request.json();
 
   if (!queueItemId || !action) {
     return NextResponse.json({ error: "queueItemId and action required" }, { status: 400 });
@@ -35,38 +36,76 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Queue item not found" }, { status: 404 });
   }
 
+  // ---------------------------------------------------------------------
+  // Send actions go through Bonzo. The item is marked sent only once Bonzo
+  // confirms, so a failed send leaves the card pending rather than showing a
+  // checkmark next to a lead who was never contacted.
+  // ---------------------------------------------------------------------
+  if (action === "send" || action === "edit_send") {
+    if (item.action_type === "call") {
+      return NextResponse.json(
+        { error: "Calls are placed in Bonzo. Use Done once you've made it." },
+        { status: 400 }
+      );
+    }
+
+    try {
+      const outcome = await sendQueueItem(serviceClient, userId, queueItemId, {
+        ...(action === "edit_send" && typeof editedMessage === "string"
+          ? { overrideBody: editedMessage }
+          : {}),
+        ...(typeof editedSubject === "string" && editedSubject.trim()
+          ? { overrideSubject: editedSubject }
+          : {}),
+      });
+
+      const todayStr = await localDateFor(userId);
+      const { data: nextItem } = await serviceClient
+        .from("daily_queue")
+        .select("*, contacts(name, loan_type, crm, stage, created_at, insights_enabled)")
+        .eq("user_id", userId)
+        .eq("queue_date", todayStr)
+        .eq("status", "pending")
+        .order("priority_rank", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+
+      return NextResponse.json({ next: nextItem ?? null, outcome });
+    } catch (e) {
+      if (e instanceof SendRefusedError) {
+        // Surfaced verbatim. Never swallow a failed send.
+        return NextResponse.json(
+          { error: e.message, reason: e.reason },
+          { status: 400 }
+        );
+      }
+      throw e;
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Non-sending actions: skip and done.
+  // ---------------------------------------------------------------------
   const statusMap: Record<string, string> = {
-    send: "sent",
-    edit_send: "edited_sent",
     skip: "skipped",
     done: "done",
   };
 
-  // An edited message is the message that was actually sent, so it becomes the
-  // row's draft_message. Previously the edit only reached outreach_log and the
-  // queue row still showed the original draft.
-  const queueUpdate: Record<string, unknown> = {
-    status: statusMap[action],
-    completed_at: new Date().toISOString(),
-  };
-  if (action === "edit_send" && typeof editedMessage === "string" && editedMessage.trim()) {
-    queueUpdate.draft_message = editedMessage;
-  }
-
   await serviceClient
     .from("daily_queue")
-    .update(queueUpdate)
+    .update({
+      status: statusMap[action],
+      completed_at: new Date().toISOString(),
+    })
     .eq("id", queueItemId);
-
-  const outreachStatus = action === "skip" ? "skipped" : "sent";
-  const message = action === "edit_send" ? editedMessage : item.draft_message;
 
   await serviceClient.from("outreach_log").insert({
     user_id: userId,
     contact_id: item.contact_id,
     action_type: item.action_type,
-    status: outreachStatus,
-    draft_message: message,
+    status: action === "skip" ? "skipped" : "done",
+    draft_message: item.draft_message,
+    email_subject: item.email_subject ?? null,
   });
 
   const todayStr = await localDateFor(userId);

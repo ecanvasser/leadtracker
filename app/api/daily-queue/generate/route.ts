@@ -297,10 +297,10 @@ export async function POST(request: NextRequest) {
 
   const queueRows = allActions.map(({ contact, action, plan, cache }, idx) => {
     const draft = draftMap.get(idx);
-    let draftMessage = draft?.draft_message ?? null;
-    if (draft?.email_subject && draftMessage) {
-      draftMessage = `Subject: ${draft.email_subject}\n\n${draftMessage}`;
-    }
+    // Subject stays in its own column. Packing it into the body as
+    // "Subject: X\n\nBody" leaked that literal line into any unedited send,
+    // and Bonzo's email endpoint takes subject and message separately anyway.
+    const draftMessage = draft?.draft_message ?? null;
 
     return {
       user_id: userId,
@@ -310,6 +310,8 @@ export async function POST(request: NextRequest) {
       priority_reason: action.priorityReason,
       action_type: action.actionType,
       draft_message: draftMessage,
+      email_subject:
+        action.actionType === "email" ? draft?.email_subject ?? null : null,
       call_talking_points: draft?.call_talking_points ?? null,
       status: "pending",
       lane: action.lane,

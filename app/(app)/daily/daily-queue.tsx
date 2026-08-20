@@ -14,7 +14,6 @@ import {
   MessageSquare,
   ChevronDown,
   ChevronUp,
-  Copy,
   Check,
   SkipForward,
   Send,
@@ -44,6 +43,7 @@ interface QueueItem {
   priority_reason: string;
   action_type: "sms" | "email" | "call";
   draft_message: string | null;
+  email_subject: string | null;
   call_talking_points: string | null;
   status: string;
   lane: string | null;
@@ -169,7 +169,6 @@ export function DailyQueue({ userId }: DailyQueueProps) {
   const [actioning, setActioning] = useState(false);
   const [editedMessage, setEditedMessage] = useState("");
   const [isEditing, setIsEditing] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
   const [traceOpen, setTraceOpen] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
@@ -217,7 +216,6 @@ export function DailyQueue({ userId }: DailyQueueProps) {
       setEditedMessage("");
     }
     setIsEditing(false);
-    setCopied(false);
     setContextOpen(false);
     setTraceOpen(false);
   }, [currentItem?.id]);
@@ -256,15 +254,6 @@ export function DailyQueue({ userId }: DailyQueueProps) {
     if (!currentItem) return;
     setActioning(true);
 
-    if (action === "send" || action === "edit_send") {
-      const textToCopy = action === "edit_send" ? editedMessage : (currentItem.draft_message ?? "");
-      if (textToCopy && currentItem.action_type !== "call") {
-        await navigator.clipboard.writeText(textToCopy);
-        // TODO: Bonzo's POST /v3/prospects/{id}/sms and POST /v3/prospects/{id}/email
-        // endpoints exist for future direct sending
-      }
-    }
-
     try {
       const res = await fetch("/api/daily-queue/action", {
         method: "POST",
@@ -273,16 +262,21 @@ export function DailyQueue({ userId }: DailyQueueProps) {
           queueItemId: currentItem.id,
           action,
           editedMessage: action === "edit_send" ? editedMessage : undefined,
+          editedSubject: action === "edit_send" ? emailSubject : undefined,
         }),
       });
       const data = await res.json();
 
+      // A refused send leaves the card exactly where it was, so the message
+      // can be fixed and retried rather than lost.
+      if (data.error) {
+        toast.error(data.error);
+        setActioning(false);
+        return;
+      }
+
       if (action === "send" || action === "edit_send") {
-        if (currentItem.action_type !== "call") {
-          toast.success("Message copied — paste it in Bonzo");
-        } else {
-          toast.success("Call logged");
-        }
+        toast.success(data.outcome?.receipt ?? "Sent");
       } else if (action === "skip") {
         toast("Skipped", { description: "Moving to next" });
       } else {
@@ -403,19 +397,11 @@ export function DailyQueue({ userId }: DailyQueueProps) {
   const contact = currentItem?.contacts;
   const priority = currentItem ? getPriorityStyle(currentItem.priority_reason) : null;
 
-  // Parse email subject from draft_message if present
-  let emailSubject = "";
-  let messageBody = currentItem?.draft_message ?? "";
-  if (currentItem?.action_type === "email" && messageBody.startsWith("Subject: ")) {
-    const splitIdx = messageBody.indexOf("\n\n");
-    if (splitIdx !== -1) {
-      emailSubject = messageBody.slice(9, splitIdx);
-      messageBody = messageBody.slice(splitIdx + 2);
-    }
-  }
-
-  // Also update editedMessage on first render without subject prefix
-  const displayEditMessage = isEditing ? editedMessage : messageBody;
+  // Subject and body are separate fields, both here and at Bonzo. Rows written
+  // before that split had the subject packed into draft_message; the migration
+  // backfilled those, and this fallback covers anything it could not parse.
+  const emailSubject = currentItem?.email_subject ?? "";
+  const messageBody = currentItem?.draft_message ?? "";
 
   return (
     <div className="flex-1 flex flex-col">
@@ -583,7 +569,7 @@ export function DailyQueue({ userId }: DailyQueueProps) {
                       </div>
                     )}
                     <p className="text-[10px] text-muted-foreground">
-                      Click to edit · Message will be copied to clipboard on send
+                      Click to edit · Sends through Bonzo on approve
                     </p>
                   </div>
                 )}
@@ -636,12 +622,10 @@ export function DailyQueue({ userId }: DailyQueueProps) {
                     >
                       {actioning ? (
                         <Loader2 className="h-4 w-4 animate-spin mr-1.5" />
-                      ) : copied ? (
-                        <Check className="h-4 w-4 mr-1.5" />
                       ) : (
-                        <Copy className="h-4 w-4 mr-1.5" />
+                        <Send className="h-4 w-4 mr-1.5" />
                       )}
-                      Copy & send
+                      Send
                     </Button>
                   )}
 

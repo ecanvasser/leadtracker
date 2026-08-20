@@ -268,3 +268,136 @@ export async function getProspectNotes(
   const json = await res.json();
   return json.data ?? json ?? [];
 }
+
+// ---------------------------------------------------------------------------
+// Sending
+//
+// Endpoints and payload shapes transcribed from Bonzo's OpenAPI document:
+//   POST /v3/prospects/{prospect}/sms    -> ApiProspectSmsRequest
+//   POST /v3/prospects/{prospect}/email  -> ApiProspectEmailRequest
+// Both return 200 with { data: ApiMessageResource }.
+//
+// Subject and body are separate fields on the email endpoint, which is why
+// email_subject is its own column rather than a "Subject: ..." prefix packed
+// into the message text.
+// ---------------------------------------------------------------------------
+
+/** The subset of ApiMessageResource a send actually needs to report. */
+export interface BonzoSendResult {
+  messageId: string;
+  /** Bonzo's own delivery status for the message. */
+  status: string;
+  /** Populated by Bonzo when the send was accepted but then failed. */
+  errorMessage: string | null;
+  createdAt: string | null;
+}
+
+/**
+ * Thrown when Bonzo accepts the request but reports the message itself failed.
+ *
+ * ApiMessageResource carries `status` and `error_message`, so a 200 is not on
+ * its own proof of a send. Treating HTTP 2xx as success would mark a queue
+ * item sent for a message that Bonzo knows never went out — which is exactly
+ * the silent failure the spec asks not to have.
+ */
+export class BonzoSendRejectedError extends Error {
+  readonly status: string;
+  readonly messageId: string;
+  constructor(status: string, messageId: string, detail: string | null) {
+    super(
+      `Bonzo accepted the request but reported the message ${status}` +
+        (detail ? `: ${detail}` : "")
+    );
+    this.name = "BonzoSendRejectedError";
+    this.status = status;
+    this.messageId = messageId;
+  }
+}
+
+/** Statuses Bonzo uses for a message that did not go out. */
+const FAILED_STATUSES = new Set([
+  "failed",
+  "error",
+  "undelivered",
+  "rejected",
+  "blocked",
+  "bounced",
+]);
+
+function toSendResult(payload: unknown): BonzoSendResult {
+  const data =
+    (payload as { data?: Record<string, unknown> } | null)?.data ??
+    (payload as Record<string, unknown> | null) ??
+    {};
+
+  const status = String(data.status ?? "");
+  const messageId = String(data.id ?? "");
+  const errorMessage =
+    (data.error_message as string | null) ||
+    (data.error_blurb as string | null) ||
+    null;
+
+  if (FAILED_STATUSES.has(status.toLowerCase())) {
+    throw new BonzoSendRejectedError(status, messageId, errorMessage);
+  }
+
+  return {
+    messageId,
+    status,
+    errorMessage,
+    createdAt: (data.created_at as string | null) ?? null,
+  };
+}
+
+export interface SendOptions {
+  /**
+   * Which Bonzo user the message is attributed to. Left unset by default so
+   * Bonzo applies its own default rather than this app silently choosing.
+   */
+  sendAs?: "owner" | "me";
+}
+
+export async function sendSms(
+  prospectId: number,
+  message: string,
+  options: SendOptions = {}
+): Promise<BonzoSendResult> {
+  const trimmed = message.trim();
+  if (!trimmed) throw new Error("Refusing to send an empty SMS");
+
+  const res = await bonzoFetch(`/v3/prospects/${prospectId}/sms`, {
+    method: "POST",
+    body: {
+      message: trimmed,
+      ...(options.sendAs ? { send_as: options.sendAs } : {}),
+    },
+  });
+
+  return toSendResult(await res.json());
+}
+
+export async function sendEmail(
+  prospectId: number,
+  subject: string,
+  message: string,
+  options: SendOptions = {}
+): Promise<BonzoSendResult> {
+  const trimmedSubject = subject.trim();
+  const trimmedMessage = message.trim();
+
+  // Both are required by the endpoint; failing here gives a clearer error than
+  // a 422 describing a field the caller never knew about.
+  if (!trimmedSubject) throw new Error("Refusing to send an email with no subject");
+  if (!trimmedMessage) throw new Error("Refusing to send an empty email");
+
+  const res = await bonzoFetch(`/v3/prospects/${prospectId}/email`, {
+    method: "POST",
+    body: {
+      subject: trimmedSubject,
+      message: trimmedMessage,
+      ...(options.sendAs ? { send_as: options.sendAs } : {}),
+    },
+  });
+
+  return toSendResult(await res.json());
+}
