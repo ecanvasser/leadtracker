@@ -4,7 +4,7 @@ import { createServiceClient } from "@/lib/supabase/service";
 import { calculateTodayActions, type QueueAction, type OutreachLogEntry, type BonzoCommEntry } from "@/lib/cadence/engine";
 import { Contact } from "@/types/db";
 import Anthropic from "@anthropic-ai/sdk";
-import { getUserTimezone, localDate } from "@/lib/time";
+import { getUserTimezone, localDate, leadAgeDays } from "@/lib/time";
 import { getMortgageFields } from "@/lib/bonzo/client";
 
 const QUEUE_DRAFT_SYSTEM = `You are a sales assistant for a mortgage broker who specializes in speed-to-lead outreach. You're generating today's outreach messages for multiple prospects.
@@ -25,6 +25,7 @@ Rules:
 7. Never be desperate or apologetic. Be confident, helpful, and assume the sale.
 
 For each prospect, return a JSON object with:
+- "action_index": the ACTION_INDEX shown for that action, copied exactly. One object per ACTION_INDEX you were given, and never two objects with the same index.
 - "contact_id": the contact's ID
 - "action_type": "sms", "email", or "call"
 - "draft_message": the message text (null for calls)
@@ -41,6 +42,15 @@ interface InsightsCache {
 }
 
 interface DraftResult {
+  /**
+   * Index into the action list this draft answers.
+   *
+   * Drafts used to be keyed by `${contact_id}:${action_type}`, but a Day-0
+   * lead gets channelHint ["sms","email","sms"] — two SMS actions — so both
+   * queue rows resolved to the same draft and the identical text would go to
+   * a brand new lead twice. The index is unique per action.
+   */
+  action_index: number;
   contact_id: string;
   action_type: string;
   draft_message: string | null;
@@ -51,18 +61,19 @@ interface DraftResult {
 function buildProspectContext(
   contact: Contact,
   cache: InsightsCache,
-  action: QueueAction
+  action: QueueAction,
+  actionIndex: number,
+  timeZone: string
 ): string {
   const prospect = cache.bonzo_prospect_data;
   const comms = cache.bonzo_communication ?? [];
-  const ageDays = Math.floor(
-    (Date.now() - new Date(contact.created_at).getTime()) / (1000 * 60 * 60 * 24)
-  );
+  const ageDays = leadAgeDays(contact.created_at, timeZone);
 
   const name = [prospect.first_name, prospect.last_name].filter(Boolean).join(" ") || contact.name;
   const mf = getMortgageFields(prospect);
 
-  let ctx = `--- PROSPECT: ${name} (ID: ${contact.id}) ---\n`;
+  let ctx = `--- ACTION_INDEX: ${actionIndex} ---\n`;
+  ctx += `PROSPECT: ${name} (contact ID: ${contact.id})\n`;
   ctx += `Lead age: Day ${ageDays + 1}\n`;
   ctx += `Action needed: ${action.actionType.toUpperCase()} — ${action.priorityReason}\n`;
   if (action.touchLabel) ctx += `Cadence: ${action.touchLabel}\n`;
@@ -206,7 +217,9 @@ export async function POST(request: NextRequest) {
   let drafts: DraftResult[] = [];
   try {
     const batchPrompt = allActions
-      .map(({ contact, action, cache }) => buildProspectContext(contact, cache, action))
+      .map(({ contact, action, cache }, idx) =>
+        buildProspectContext(contact, cache, action, idx, timeZone)
+      )
       .join("\n\n");
 
     const client = new Anthropic();
@@ -221,7 +234,8 @@ export async function POST(request: NextRequest) {
     const cleaned = text.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
     drafts = JSON.parse(cleaned) as DraftResult[];
   } catch {
-    drafts = allActions.map(({ contact, action }) => ({
+    drafts = allActions.map(({ contact, action }, idx) => ({
+      action_index: idx,
       contact_id: contact.id,
       action_type: action.actionType,
       draft_message: action.actionType === "call" ? null : "(Draft generation failed — write your own message)",
@@ -230,9 +244,12 @@ export async function POST(request: NextRequest) {
     }));
   }
 
-  const draftMap = new Map<string, DraftResult>();
+  const draftMap = new Map<number, DraftResult>();
   for (const d of drafts) {
-    draftMap.set(`${d.contact_id}:${d.action_type}`, d);
+    if (typeof d.action_index !== "number") continue;
+    // First write wins, so a duplicated index from the model cannot overwrite
+    // a draft that was already matched to its action.
+    if (!draftMap.has(d.action_index)) draftMap.set(d.action_index, d);
   }
 
   await serviceClient
@@ -242,7 +259,7 @@ export async function POST(request: NextRequest) {
     .eq("queue_date", todayStr);
 
   const queueRows = allActions.map(({ contact, action }, idx) => {
-    const draft = draftMap.get(`${contact.id}:${action.actionType}`);
+    const draft = draftMap.get(idx);
     let draftMessage = draft?.draft_message ?? null;
     if (draft?.email_subject && draftMessage) {
       draftMessage = `Subject: ${draft.email_subject}\n\n${draftMessage}`;
