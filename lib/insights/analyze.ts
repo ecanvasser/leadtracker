@@ -10,6 +10,14 @@ import {
 export interface AiAnalysis {
   status_read: string;
   suggested_next_step: string;
+  /**
+   * Populated by lib/ai/draft.ts, not by this module.
+   *
+   * analyze.ts used to generate its own drafts with its own prompt and no
+   * validation, in parallel with the queue generating different drafts for the
+   * same lead. There is now one drafting path and this field is filled from
+   * it. Kept on the analysis object so the contact page's shape is unchanged.
+   */
   draft_messages: {
     channel: "sms" | "email";
     subject?: string;
@@ -28,9 +36,7 @@ Produce a JSON object with these sections:
 
 2. "suggested_next_step" — 1-2 sentences. What to do and why, referencing specific evidence. "Hold and do not contact" is a valid answer when nothing has changed.
 
-3. "draft_messages" — 0-2 suggested messages. Each has "channel" (sms or email), "subject" (email only), and "body". Return an empty array if the right move is to send nothing; do not manufacture a touch to fill this field.
-
-4. "suggested_todos" — 0-3 concrete to-dos, each with a "title". Only things the conversation actually calls for.
+3. "suggested_todos" — 0-3 concrete to-dos, each with a "title". Only things the conversation actually calls for.
 
 Respond ONLY with the JSON object. No markdown, no backticks, no preamble.`;
 
@@ -140,5 +146,8 @@ export async function analyzeProspect(
     throw new Error("Invalid AI analysis response shape");
   }
 
-  return parsed;
+  // Drafting is not this module's job. The caller fills draft_messages from
+  // lib/ai/draft.ts so the contact page and the queue produce the same text
+  // under the same constraints.
+  return { ...parsed, draft_messages: [] };
 }
