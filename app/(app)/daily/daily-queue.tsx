@@ -46,7 +46,44 @@ interface QueueItem {
   draft_message: string | null;
   call_talking_points: string | null;
   status: string;
+  lane: string | null;
+  touch_label: string | null;
+  decision_trace: DecisionTrace | null;
   contacts: QueueContact;
+}
+
+/** Audit record written at generation time. See 1.6 in the rework spec. */
+interface DecisionTrace {
+  lane?: string;
+  rule_fired?: string;
+  lead_age_days?: number;
+  priority?: {
+    score?: number;
+    reason?: string;
+    base_score?: number | null;
+    is_overdue?: boolean;
+  };
+  lead_state?: {
+    lead_temp?: string;
+    blocker?: string;
+    blocker_confidence?: string;
+    blocker_evidence?: string | null;
+    why_now?: string;
+    recommended_action?: string;
+  } | null;
+  drafting?: {
+    model?: string | null;
+    prompt_version?: string;
+    temperature?: number | null;
+    attempts?: number | null;
+    validated?: boolean | null;
+    violations?: { rule: string; detail: string }[];
+    input_tokens?: number | null;
+    output_tokens?: number | null;
+    latency_ms?: number | null;
+  };
+  inputs?: Record<string, unknown>;
+  generated_at?: string;
 }
 
 interface QueueSummary {
@@ -134,6 +171,7 @@ export function DailyQueue({ userId }: DailyQueueProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [copied, setCopied] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
+  const [traceOpen, setTraceOpen] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
   const router = useRouter();
 
@@ -181,6 +219,7 @@ export function DailyQueue({ userId }: DailyQueueProps) {
     setIsEditing(false);
     setCopied(false);
     setContextOpen(false);
+    setTraceOpen(false);
   }, [currentItem?.id]);
 
   async function handleGenerate(force = false) {
@@ -456,12 +495,39 @@ export function DailyQueue({ userId }: DailyQueueProps) {
             <Card className="overflow-hidden">
               {/* Priority stripe */}
               <div className={`px-4 py-2.5 ${priority.bg} border-b ${priority.border}`}>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className={priority.color}>{priority.icon}</span>
                   <span className={`text-xs font-semibold uppercase tracking-wider ${priority.color}`}>
                     {currentItem.priority_reason}
                   </span>
+                  {/* Computed by the engine and previously never displayed. */}
+                  {currentItem.touch_label && (
+                    <Badge variant="outline" className="text-[10px] py-0">
+                      {currentItem.touch_label}
+                    </Badge>
+                  )}
+                  {currentItem.decision_trace?.lead_state?.lead_temp && (
+                    <Badge variant="secondary" className="text-[10px] py-0">
+                      {currentItem.decision_trace.lead_state.lead_temp.replace(/_/g, " ")}
+                    </Badge>
+                  )}
+                  {currentItem.decision_trace?.lead_state?.blocker &&
+                    currentItem.decision_trace.lead_state.blocker !== "none" && (
+                      <Badge variant="destructive" className="text-[10px] py-0">
+                        {currentItem.decision_trace.lead_state.blocker.replace(/_/g, " ")}
+                      </Badge>
+                    )}
+                  {currentItem.decision_trace?.drafting?.validated === false && (
+                    <Badge variant="destructive" className="text-[10px] py-0">
+                      unvalidated draft
+                    </Badge>
+                  )}
                 </div>
+                {currentItem.decision_trace?.lead_state?.why_now && (
+                  <p className="text-[11px] text-muted-foreground mt-1.5">
+                    {currentItem.decision_trace.lead_state.why_now}
+                  </p>
+                )}
               </div>
 
               <CardContent className="pt-5 pb-5 space-y-5">
@@ -632,9 +698,115 @@ export function DailyQueue({ userId }: DailyQueueProps) {
                     </div>
                   )}
                 </div>
+
+                {/* Why this fired. When a suggestion is bad, this is how to
+                    see which rule produced it and on what inputs. */}
+                {currentItem.decision_trace && (
+                  <div className="border-t border-border/50 pt-3">
+                    <button
+                      onClick={() => setTraceOpen(!traceOpen)}
+                      className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors w-full"
+                    >
+                      {traceOpen ? (
+                        <ChevronUp className="h-3 w-3" />
+                      ) : (
+                        <ChevronDown className="h-3 w-3" />
+                      )}
+                      Why this surfaced
+                    </button>
+
+                    {traceOpen && (
+                      <DecisionTracePanel trace={currentItem.decision_trace} />
+                    )}
+                  </div>
+                )}
               </CardContent>
             </Card>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Renders the audit record for a queue item.
+ *
+ * Deliberately plain: this is read by a person who thinks a suggestion is
+ * wrong and wants to know why it fired, so it favours legibility over density.
+ */
+function DecisionTracePanel({ trace }: { trace: DecisionTrace }) {
+  const rows: [string, string][] = [];
+
+  if (trace.lane) rows.push(["Lane", trace.lane.replace(/_/g, " ")]);
+  if (trace.rule_fired) rows.push(["Rule fired", String(trace.rule_fired).replace(/_/g, " ")]);
+  if (typeof trace.lead_age_days === "number") {
+    rows.push(["Lead age", `${trace.lead_age_days} days`]);
+  }
+  if (trace.priority?.score !== undefined) {
+    const base = trace.priority.base_score;
+    rows.push([
+      "Priority",
+      `${trace.priority.score}${base != null ? ` (base ${base}${trace.priority.is_overdue ? " + 400 overdue" : ""})` : ""}`,
+    ]);
+  }
+  if (trace.lead_state?.blocker_confidence) {
+    rows.push(["Blocker confidence", trace.lead_state.blocker_confidence]);
+  }
+
+  const d = trace.drafting;
+  if (d?.model) {
+    rows.push([
+      "Model",
+      `${d.model}${d.prompt_version ? ` · prompt v${d.prompt_version}` : ""}${
+        d.temperature != null ? ` · temp ${d.temperature}` : ""
+      }`,
+    ]);
+  }
+  if (d?.attempts != null) {
+    rows.push(["Draft attempts", d.attempts === 1 ? "1 (passed first time)" : String(d.attempts)]);
+  }
+  if (d?.input_tokens != null || d?.output_tokens != null) {
+    rows.push([
+      "Tokens",
+      `${d.input_tokens ?? "?"} in / ${d.output_tokens ?? "?"} out${
+        d.latency_ms != null ? ` · ${(d.latency_ms / 1000).toFixed(1)}s` : ""
+      }`,
+    ]);
+  }
+
+  return (
+    <div className="mt-3 space-y-3">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px]">
+        {rows.map(([label, value]) => (
+          <div key={label} className="contents">
+            <dt className="text-muted-foreground">{label}</dt>
+            <dd className="font-mono">{value}</dd>
+          </div>
+        ))}
+      </dl>
+
+      {trace.lead_state?.blocker_evidence && (
+        <div className="text-[11px]">
+          <p className="text-muted-foreground mb-0.5">Blocker evidence (verbatim)</p>
+          <blockquote className="border-l-2 border-border pl-2 italic">
+            {trace.lead_state.blocker_evidence}
+          </blockquote>
+        </div>
+      )}
+
+      {d?.violations && d.violations.length > 0 && (
+        <div className="text-[11px]">
+          <p className="text-muted-foreground mb-0.5">
+            Draft shown despite failing validation
+          </p>
+          <ul className="list-disc pl-4 space-y-0.5">
+            {d.violations.map((v, i) => (
+              <li key={i}>
+                <span className="font-mono">{v.rule}</span> — {v.detail}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
     </div>

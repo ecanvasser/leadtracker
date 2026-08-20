@@ -7,7 +7,7 @@ import type { LeadState } from "@/lib/insights/lead-state";
 import { Contact } from "@/types/db";
 import { getUserTimezone, localDate, leadAgeDays } from "@/lib/time";
 import { getMortgageFields } from "@/lib/bonzo/client";
-import { callModel, DRAFT_TEMPERATURE } from "@/lib/ai/models";
+import { callModel, DRAFT_TEMPERATURE, modelFor, type ModelUsage } from "@/lib/ai/models";
 import { buildStablePrefix } from "@/lib/ai/prompts";
 import { buildConstraintBlock, type DraftContext, type Violation } from "@/lib/ai/validate";
 import {
@@ -18,6 +18,13 @@ import {
 } from "@/lib/ai/draft-validation";
 import { exemplarsFor } from "@/lib/ai/voice-profile";
 import type { VoiceProfile } from "@/lib/ai/voice-profile-types";
+
+/**
+ * Bumped whenever the drafting prompt changes in a way that could alter
+ * output. Recorded in every decision_trace so a bad suggestion can be tied to
+ * the exact wording that produced it.
+ */
+export const DRAFT_PROMPT_VERSION = "1.3.0";
 
 /**
  * Output contract, appended after the stable prefix.
@@ -85,6 +92,9 @@ interface DraftResult {
   /** Populated by validation; not returned by the model. */
   violations?: Violation[];
   validated?: boolean;
+  /** Populated after generation; not returned by the model. */
+  usage?: ModelUsage;
+  attempts?: number;
 }
 
 function buildProspectContext(
@@ -225,11 +235,11 @@ function parseDraftResponse(text: string): DraftResult[] {
  * Drafts one chunk. Retries once on a parse failure, then gives up and lets
  * the caller fall back for this chunk alone.
  */
-async function draftChunk(
+async function draftChunkWithUsage(
   chunk: { item: PendingAction; index: number }[],
   settings: DraftSettings,
   retryInstruction: string | null = null
-): Promise<DraftResult[]> {
+): Promise<{ drafts: DraftResult[]; usage: ModelUsage }> {
   // Style exemplars: this prospect's own recent outbound messages if there are
   // any, since matching the register of an existing thread matters more than
   // matching his general voice. Falls back to the chunk's other threads.
@@ -274,7 +284,7 @@ async function draftChunk(
       }
       const parsed = result.parsed ?? parseDraftResponse(result.text);
       if (!Array.isArray(parsed)) throw new Error("Draft response was not an array");
-      return parsed;
+      return { drafts: parsed, usage: result.usage };
     } catch (e) {
       lastError = e;
     }
@@ -310,9 +320,12 @@ async function generateDrafts(
       const byIndex = new Map(chunk.map((c) => [c.index, c]));
 
       try {
-        let drafted = (await draftChunk(chunk, settings)).filter((d) =>
-          allowed.has(d.action_index)
-        );
+        const first = await draftChunkWithUsage(chunk, settings);
+        let drafted = first.drafts.filter((d) => allowed.has(d.action_index));
+        for (const d of drafted) {
+          d.usage = first.usage;
+          d.attempts = 1;
+        }
 
         // Validate every draft against the 1.3 constraints.
         let failures = collectFailures(drafted, byIndex, settings);
@@ -334,9 +347,16 @@ async function generateDrafts(
           );
 
           try {
-            const retried = (
-              await draftChunk(retryChunk, settings, buildRetryInstruction(failures))
-            ).filter((d) => allowed.has(d.action_index));
+            const second = await draftChunkWithUsage(
+              retryChunk,
+              settings,
+              buildRetryInstruction(failures)
+            );
+            const retried = second.drafts.filter((d) => allowed.has(d.action_index));
+            for (const d of retried) {
+              d.usage = second.usage;
+              d.attempts = 2;
+            }
 
             const replaced = new Map(retried.map((d) => [d.action_index, d]));
             drafted = drafted.map((d) => replaced.get(d.action_index) ?? d);
@@ -418,6 +438,79 @@ function collectFailures(
   }
 
   return failures;
+}
+
+/**
+ * Assembles the audit record for one queue item.
+ *
+ * Everything here answers "why did this fire, and what did it cost". The
+ * shape is intentionally flat and readable — this is meant to be looked at by
+ * a person staring at a bad suggestion, not parsed by anything.
+ */
+function buildDecisionTrace(input: {
+  action: QueueAction;
+  plan: LeadPlan;
+  draft: DraftResult | undefined;
+  leadState: LeadState | null;
+  cadenceConfig: CadenceConfig;
+  timeZone: string;
+}): Record<string, unknown> {
+  const { action, plan, draft, leadState, cadenceConfig, timeZone } = input;
+
+  return {
+    // Which lane and which rule inside it.
+    lane: action.lane,
+    rule_fired: plan.inputs.rule ?? null,
+    lead_age_days: plan.ageDays,
+
+    // The priority arithmetic, so a surprising rank can be traced.
+    priority: {
+      score: action.priorityScore,
+      reason: action.priorityReason,
+      base_score: plan.inputs.base_score ?? null,
+      is_overdue: plan.inputs.is_overdue ?? false,
+      target_messages: plan.inputs.target_messages ?? null,
+      target_calls: plan.inputs.target_calls ?? null,
+    },
+
+    // What the classifier believed, and what it could prove.
+    lead_state: leadState
+      ? {
+          lead_temp: leadState.lead_temp,
+          blocker: leadState.blocker,
+          blocker_confidence: leadState.blocker_confidence,
+          blocker_evidence: leadState.blocker_evidence,
+          why_now: leadState.why_now,
+          recommended_action: leadState.recommended_action,
+        }
+      : null,
+
+    // Raw engine inputs, verbatim.
+    inputs: plan.inputs,
+
+    // The cadence constants in force at generation time — a trace read weeks
+    // later is misleading if the settings have since changed.
+    cadence_config: cadenceConfig,
+    timezone: timeZone,
+
+    // Drafting: model, prompt version, validation outcome and spend.
+    drafting: draft
+      ? {
+          model: draft.usage?.model ?? modelFor("draft"),
+          prompt_version: DRAFT_PROMPT_VERSION,
+          temperature: draft.usage?.temperature ?? null,
+          attempts: draft.attempts ?? null,
+          validated: draft.validated ?? null,
+          violations: draft.violations ?? [],
+          input_tokens: draft.usage?.input_tokens ?? null,
+          output_tokens: draft.usage?.output_tokens ?? null,
+          cache_read_input_tokens: draft.usage?.cache_read_input_tokens ?? null,
+          latency_ms: draft.usage?.latency_ms ?? null,
+        }
+      : { model: null, prompt_version: DRAFT_PROMPT_VERSION, note: "no draft produced" },
+
+    generated_at: new Date().toISOString(),
+  };
 }
 
 export async function POST(request: NextRequest) {
@@ -632,7 +725,7 @@ export async function POST(request: NextRequest) {
   // counting up rather than resetting.
   const rankOffset = actionedRows.length;
 
-  const queueRows = allActions.map(({ contact, action }, idx) => {
+  const queueRows = allActions.map(({ contact, action, plan, cache }, idx) => {
     const draft = draftMap.get(idx);
     let draftMessage = draft?.draft_message ?? null;
     if (draft?.email_subject && draftMessage) {
@@ -649,6 +742,16 @@ export async function POST(request: NextRequest) {
       draft_message: draftMessage,
       call_talking_points: draft?.call_talking_points ?? null,
       status: "pending",
+      lane: action.lane,
+      touch_label: action.touchLabel,
+      decision_trace: buildDecisionTrace({
+        action,
+        plan,
+        draft,
+        leadState: cache.lead_state,
+        cadenceConfig,
+        timeZone,
+      }),
     };
   });
 
