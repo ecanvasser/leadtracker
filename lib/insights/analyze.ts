@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { ANALYSIS_SYSTEM } from "@/lib/ai/prompts";
 import {
   getMortgageFields,
   type BonzoProspect,
@@ -19,22 +20,17 @@ export interface AiAnalysis {
   }[];
 }
 
-const SYSTEM_PROMPT = `You are a sales assistant for a mortgage broker. You're analyzing a prospect's communication history to help the broker follow up effectively.
+const SYSTEM_PROMPT = `${ANALYSIS_SYSTEM}
 
-You will receive:
-1. The prospect's profile (name, contact info, mortgage details like loan type, amount, credit score, property info).
-2. The full messaging history between the broker and the prospect (SMS and email, with direction and timestamps).
-3. Any internal notes the broker has left.
+Produce a JSON object with these sections:
 
-Your job is to produce a JSON object with these sections:
+1. "status_read" — 2-3 sentences on where things actually stand. When was the last contact, who spoke last, is the prospect responding, what is the open question. If the honest answer is "this has gone quiet and nothing has changed", write that.
 
-1. "status_read" — 2-3 sentences summarizing where things stand. When was the last contact? Who messaged last? Is the prospect responsive or going cold? What's the current topic of conversation?
+2. "suggested_next_step" — 1-2 sentences. What to do and why, referencing specific evidence. "Hold and do not contact" is a valid answer when nothing has changed.
 
-2. "suggested_next_step" — 1-2 sentences on what the broker should do next and why. Be specific and actionable.
+3. "draft_messages" — 0-2 suggested messages. Each has "channel" (sms or email), "subject" (email only), and "body". Return an empty array if the right move is to send nothing; do not manufacture a touch to fill this field.
 
-3. "draft_messages" — An array of 1-2 suggested follow-up messages. Each has a "channel" (sms or email), a "subject" (for email only), and "body". CRITICAL: Study the broker's previous outbound messages carefully — match their exact writing style, tone, greeting patterns, emoji usage (or lack thereof), sentence length, punctuation habits, and level of formality. The messages must sound like the broker wrote them, not like an AI. If the broker writes casually with abbreviations, do that. If they're formal, be formal. Mirror them precisely so the prospect can't tell the difference.
-
-4. "suggested_todos" — An array of 1-3 actionable to-do items the broker should handle for this prospect. Each has a "title" (short, action-oriented, like "Get updated rate quote", "Request W-2s", "Send pre-approval letter", "Follow up on appraisal", "Check on title report"). Only suggest things that are relevant based on the conversation context and loan stage.
+4. "suggested_todos" — 0-3 concrete to-dos, each with a "title". Only things the conversation actually calls for.
 
 Respond ONLY with the JSON object. No markdown, no backticks, no preamble.`;
 
