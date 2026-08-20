@@ -187,3 +187,23 @@ describe("sweepRefreshJobs", () => {
     expect(inserts.map((i) => i.job_type)).toEqual(["refresh_cache", "refresh_cache"]);
   });
 });
+
+/**
+ * The inbound-reply path must respect the card throttle.
+ *
+ * "Near-real-time" means the reply is first in the queue, not exempt from it.
+ * Three replies arriving together produced three simultaneous cards, which is
+ * precisely the flood the throttle exists to prevent.
+ */
+describe("inbound replies respect the one-card throttle", () => {
+  it("uses the throttled push, not the bypass", async () => {
+    const src = await import("node:fs").then((fs) =>
+      fs.readFileSync("lib/jobs/handlers.ts", "utf8")
+    );
+    const draftReplyBody = src.slice(src.indexOf("export const draftReply"));
+
+    expect(draftReplyBody).toContain("pushNextCard");
+    // pushCard bypasses hasOutstandingCard(); draft_reply must not call it.
+    expect(draftReplyBody).not.toMatch(/\bawait pushCard\(/);
+  });
+});

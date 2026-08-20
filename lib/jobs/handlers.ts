@@ -408,8 +408,13 @@ export const draftReply: JobHandler = async (supabase, job) => {
   const { draftSingleQueueItem } = await import("@/lib/ai/draft-one");
   const drafted = await draftSingleQueueItem(supabase, contact.user_id, inserted.id);
 
-  const { pushCard } = await import("@/lib/telegram/push");
-  const push = await pushCard(supabase, contact.user_id, inserted.id);
+  // pushNextCard, not pushCard: the throttle still applies. The reply item is
+  // rank 0, so it is next in line regardless — but three replies arriving
+  // together must not produce three simultaneous cards. That is the flood the
+  // throttle exists to prevent, and "near-real-time" means first in the queue,
+  // not exempt from it.
+  const { pushNextCard } = await import("@/lib/telegram/push");
+  const push = await pushNextCard(supabase, contact.user_id);
 
   return {
     summary:
