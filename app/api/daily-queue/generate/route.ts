@@ -3,14 +3,27 @@ import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
 import { calculateTodayActions, type QueueAction, type OutreachLogEntry, type BonzoCommEntry } from "@/lib/cadence/engine";
 import { Contact } from "@/types/db";
-import Anthropic from "@anthropic-ai/sdk";
 import { getUserTimezone, localDate, leadAgeDays } from "@/lib/time";
 import { getMortgageFields } from "@/lib/bonzo/client";
-import { DRAFT_SYSTEM_BASE } from "@/lib/ai/prompts";
+import { callModel, DRAFT_TEMPERATURE } from "@/lib/ai/models";
+import { buildStablePrefix } from "@/lib/ai/prompts";
+import { buildConstraintBlock, type DraftContext, type Violation } from "@/lib/ai/validate";
+import {
+  buildGroundingCorpus,
+  buildRetryInstruction,
+  checkDraft,
+  hasIntroducedSelf,
+} from "@/lib/ai/draft-validation";
+import { exemplarsFor } from "@/lib/ai/voice-profile";
+import type { VoiceProfile } from "@/lib/ai/voice-profile-types";
 
-const QUEUE_DRAFT_SYSTEM = `${DRAFT_SYSTEM_BASE}
-
-You will receive one or more actions. Each begins with an ACTION_INDEX line, then the prospect, their loan details, the recent conversation, and what action is due and why.
+/**
+ * Output contract, appended after the stable prefix.
+ *
+ * Kept separate from the tone and constraint blocks so the stable prefix stays
+ * byte-identical across leads and remains cacheable.
+ */
+const DRAFT_OUTPUT_CONTRACT = `You will receive one or more actions. Each begins with an ACTION_INDEX line, then the prospect, their loan details, the recent conversation, and what action is due and why.
 
 For each ACTION_INDEX you were given, return one JSON object:
 - "action_index": the ACTION_INDEX for that action, copied exactly. One object per index, never two with the same index.
@@ -21,6 +34,28 @@ For each ACTION_INDEX you were given, return one JSON object:
 - "call_talking_points": bullet points (calls only, null otherwise)
 
 Return a JSON array. No markdown, no backticks, no preamble.`;
+
+/**
+ * Assembles the drafting system prompt for this user.
+ *
+ * Fixed order — tone, constraints, voice profile, exemplars — then the output
+ * contract. Nothing per-lead appears here; per-lead context goes in the user
+ * message so the prefix stays cacheable.
+ */
+function buildDraftSystem(settings: DraftSettings, exemplars: string[]): string {
+  return [
+    buildStablePrefix({
+      constraints: buildConstraintBlock({
+        brokerName: settings.brokerName,
+        brokerCompany: settings.brokerCompany,
+        allowEmoji: settings.voiceProfile?.uses_emoji ?? false,
+      }),
+      voiceProfile: settings.voiceProfile,
+      exemplars,
+    }),
+    DRAFT_OUTPUT_CONTRACT,
+  ].join("\n\n");
+}
 
 interface InsightsCache {
   contact_id: string;
@@ -44,6 +79,9 @@ interface DraftResult {
   draft_message: string | null;
   email_subject: string | null;
   call_talking_points: string | null;
+  /** Populated by validation; not returned by the model. */
+  violations?: Violation[];
+  validated?: boolean;
 }
 
 function buildProspectContext(
@@ -108,6 +146,48 @@ const DRAFT_CONCURRENCY = 3;
 
 type PendingAction = { contact: Contact; action: QueueAction; cache: InsightsCache };
 
+/** Per-user drafting configuration, read once per generation. */
+export interface DraftSettings {
+  brokerName: string;
+  brokerCompany: string;
+  voiceProfile: VoiceProfile | null;
+  timeZone: string;
+}
+
+/**
+ * Builds the validation context for one action.
+ *
+ * isFirstOutbound comes from real Bonzo history rather than lead age: a
+ * day-old lead he has already replied to has been introduced, and a month-old
+ * lead he never answered has not.
+ */
+function draftContextFor(
+  item: PendingAction,
+  settings: DraftSettings
+): DraftContext {
+  const comms = item.cache.bonzo_communication ?? [];
+  const prospect = item.cache.bonzo_prospect_data;
+  const firstName =
+    (prospect?.first_name as string | undefined)?.trim() ||
+    item.contact.name.split(" ")[0] ||
+    "there";
+
+  return {
+    channel: item.action.actionType === "email" ? "email" : "sms",
+    firstName,
+    brokerName: settings.brokerName,
+    brokerCompany: settings.brokerCompany,
+    isFirstOutbound: !hasIntroducedSelf(
+      comms,
+      settings.brokerName,
+      settings.brokerCompany
+    ),
+    allowEmoji: settings.voiceProfile?.uses_emoji ?? false,
+    neverUses: settings.voiceProfile?.never_uses ?? [],
+    groundingCorpus: buildGroundingCorpus(prospect, comms),
+  };
+}
+
 function fallbackDraft(
   { contact, action }: PendingAction,
   index: number
@@ -144,36 +224,54 @@ function parseDraftResponse(text: string): DraftResult[] {
  */
 async function draftChunk(
   chunk: { item: PendingAction; index: number }[],
-  timeZone: string
+  settings: DraftSettings,
+  retryInstruction: string | null = null
 ): Promise<DraftResult[]> {
-  const client = new Anthropic();
+  // Style exemplars: this prospect's own recent outbound messages if there are
+  // any, since matching the register of an existing thread matters more than
+  // matching his general voice. Falls back to the chunk's other threads.
+  const perProspect = exemplarsFor(chunk[0]?.item.cache.bonzo_communication ?? []);
+  const exemplars =
+    perProspect.length > 0
+      ? perProspect
+      : exemplarsFor(
+          chunk.flatMap((c) => c.item.cache.bonzo_communication ?? [])
+        );
 
   const prompt = chunk
     .map(({ item, index }) =>
-      buildProspectContext(item.contact, item.cache, item.action, index, timeZone)
+      buildProspectContext(item.contact, item.cache, item.action, index, settings.timeZone)
     )
     .join("\n\n");
+
+  const userContent = retryInstruction
+    ? `${prompt}\n\n${retryInstruction}`
+    : prompt;
 
   // Scaled to the chunk rather than fixed at 4096. A truncated response is
   // what turned one bad generation into "(Draft generation failed)" for every
   // lead in the queue.
-  const maxTokens = Math.min(8192, 1200 * chunk.length);
+  const maxTokens = Math.min(8192, 1500 * chunk.length);
 
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const response = await client.messages.create({
-        model: "claude-sonnet-4-6",
-        max_tokens: maxTokens,
-        system: QUEUE_DRAFT_SYSTEM,
-        messages: [{ role: "user", content: prompt }],
+      const result = await callModel<DraftResult[]>({
+        role: "draft",
+        system: buildDraftSystem(settings, exemplars),
+        maxTokens,
+        // Sent only if the configured model still accepts sampling; the
+        // current default does not. See lib/ai/models.ts.
+        temperature: DRAFT_TEMPERATURE,
+        messages: [{ role: "user", content: userContent }],
       });
-      const text =
-        response.content[0]?.type === "text" ? response.content[0].text : "";
-      if (response.stop_reason === "max_tokens") {
+
+      if (result.truncated) {
         throw new Error("Draft response hit max_tokens and was truncated");
       }
-      return parseDraftResponse(text);
+      const parsed = result.parsed ?? parseDraftResponse(result.text);
+      if (!Array.isArray(parsed)) throw new Error("Draft response was not an array");
+      return parsed;
     } catch (e) {
       lastError = e;
     }
@@ -191,7 +289,7 @@ async function draftChunk(
  */
 async function generateDrafts(
   allActions: PendingAction[],
-  timeZone: string
+  settings: DraftSettings
 ): Promise<DraftResult[]> {
   const indexed = allActions.map((item, index) => ({ item, index }));
   const chunks: (typeof indexed)[] = [];
@@ -205,23 +303,75 @@ async function generateDrafts(
   async function worker() {
     while (cursor < chunks.length) {
       const chunk = chunks[cursor++];
+      const allowed = new Set(chunk.map((c) => c.index));
+      const byIndex = new Map(chunk.map((c) => [c.index, c]));
+
       try {
-        const drafted = await draftChunk(chunk, timeZone);
-        // Keep only indices this chunk was actually asked for, so a confused
-        // response cannot clobber another chunk's drafts.
-        const allowed = new Set(chunk.map((c) => c.index));
-        const kept = drafted.filter((d) => allowed.has(d.action_index));
+        let drafted = (await draftChunk(chunk, settings)).filter((d) =>
+          allowed.has(d.action_index)
+        );
+
+        // Validate every draft against the 1.3 constraints.
+        let failures = collectFailures(drafted, byIndex, settings);
+
+        // Exactly one corrective retry, covering only the failing actions.
+        // Never a loop: an over-strict validator must degrade into showing
+        // something flagged, not into spending tokens until it passes.
+        if (failures.length > 0) {
+          const retryChunk = failures
+            .map((f) => byIndex.get(f.index))
+            .filter((c): c is { item: PendingAction; index: number } => Boolean(c));
+
+          console.warn(
+            `[daily-queue/generate] ${failures.length} draft(s) failed validation; ` +
+              `retrying once. Reasons: ` +
+              failures
+                .flatMap((f) => f.violations.map((v) => v.rule))
+                .join(", ")
+          );
+
+          try {
+            const retried = (
+              await draftChunk(retryChunk, settings, buildRetryInstruction(failures))
+            ).filter((d) => allowed.has(d.action_index));
+
+            const replaced = new Map(retried.map((d) => [d.action_index, d]));
+            drafted = drafted.map((d) => replaced.get(d.action_index) ?? d);
+            failures = collectFailures(drafted, byIndex, settings);
+          } catch (e) {
+            console.error(
+              `[daily-queue/generate] corrective retry failed: ` +
+                `${e instanceof Error ? e.message : String(e)}`
+            );
+          }
+        }
+
+        // Annotate whatever we ended up with. Anything still failing is shown
+        // to the broker flagged rather than withheld.
+        const stillFailing = new Map(failures.map((f) => [f.index, f.violations]));
+        for (const d of drafted) {
+          const violations = stillFailing.get(d.action_index) ?? [];
+          d.violations = violations;
+          d.validated = violations.length === 0;
+          if (violations.length > 0) {
+            console.warn(
+              `[daily-queue/generate] surfacing unvalidated draft for action ` +
+                `${d.action_index}: ${violations.map((v) => v.rule).join(", ")}`
+            );
+          }
+        }
+
         const missing = chunk.filter(
-          (c) => !kept.some((d) => d.action_index === c.index)
+          (c) => !drafted.some((d) => d.action_index === c.index)
         );
         if (missing.length > 0) {
           console.warn(
-            `[daily-queue/generate] chunk returned ${kept.length}/${chunk.length} drafts; ` +
+            `[daily-queue/generate] chunk returned ${drafted.length}/${chunk.length} drafts; ` +
               `falling back for indices ${missing.map((m) => m.index).join(", ")}`
           );
         }
         results.push(
-          ...kept,
+          ...drafted,
           ...missing.map(({ item, index }) => fallbackDraft(item, index))
         );
       } catch (e) {
@@ -244,6 +394,29 @@ async function generateDrafts(
   return results;
 }
 
+/** Validates a chunk's drafts, returning only those that broke a rule. */
+function collectFailures(
+  drafted: DraftResult[],
+  byIndex: Map<number, { item: PendingAction; index: number }>,
+  settings: DraftSettings
+): { index: number; violations: Violation[] }[] {
+  const failures: { index: number; violations: Violation[] }[] = [];
+
+  for (const d of drafted) {
+    const entry = byIndex.get(d.action_index);
+    if (!entry) continue;
+    const violations = checkDraft(
+      d.draft_message,
+      draftContextFor(entry.item, settings)
+    );
+    if (violations.length > 0) {
+      failures.push({ index: d.action_index, violations });
+    }
+  }
+
+  return failures;
+}
+
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
   const { data: authData } = await supabase.auth.getClaims();
@@ -259,6 +432,21 @@ export async function POST(request: NextRequest) {
   // 5 PM Pacific and silently discarded the afternoon block.
   const timeZone = await getUserTimezone(userId);
   const todayStr = localDate(new Date(), timeZone);
+
+  // Broker identity and voice profile drive both the prompt and the validator,
+  // so they are read once and threaded through drafting.
+  const { data: userSettings } = await serviceClient
+    .from("user_settings")
+    .select("broker_display_name, broker_company, voice_profile")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  const draftSettings: DraftSettings = {
+    brokerName: userSettings?.broker_display_name ?? "Eddie Canvasser",
+    brokerCompany: userSettings?.broker_company ?? "E Mortgage Capital",
+    voiceProfile: (userSettings?.voice_profile as VoiceProfile | null) ?? null,
+    timeZone,
+  };
 
   const { data: existingQueue } = await serviceClient
     .from("daily_queue")
@@ -390,7 +578,7 @@ export async function POST(request: NextRequest) {
     return new Date(a.contact.created_at).getTime() - new Date(b.contact.created_at).getTime();
   });
 
-  const drafts = await generateDrafts(allActions, timeZone);
+  const drafts = await generateDrafts(allActions, draftSettings);
 
   const draftMap = new Map<number, DraftResult>();
   for (const d of drafts) {
