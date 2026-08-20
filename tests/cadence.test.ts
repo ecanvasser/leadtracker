@@ -4,6 +4,7 @@ import {
   type OutreachLogEntry,
   type BonzoCommEntry,
 } from "@/lib/cadence/engine";
+import { DEFAULT_CADENCE_CONFIG } from "@/lib/cadence/config";
 import type { Contact } from "@/types/db";
 
 const LA = "America/Los_Angeles";
@@ -137,7 +138,7 @@ describe("weekend rules", () => {
     const actions = calculateTodayActions(contact(), [], [], {
       timeZone: LA,
       now: SUNDAY,
-      workSunday: true,
+      config: { ...DEFAULT_CADENCE_CONFIG, work_sunday: true },
     });
     expect(actions.length).toBeGreaterThan(0);
   });
@@ -166,7 +167,7 @@ describe("weekend rules", () => {
     const actions = calculateTodayActions(contact(), [], [], {
       timeZone: LA,
       now: SATURDAY,
-      workSaturday: false,
+      config: { ...DEFAULT_CADENCE_CONFIG, work_saturday: false },
     });
     expect(actions).toEqual([]);
   });
@@ -221,5 +222,237 @@ describe("unanswered reply detection", () => {
       now: THURSDAY_MORNING,
     });
     expect(actions.every((a) => a.priorityScore !== 1000)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1.5 Two-lane cadence
+// ---------------------------------------------------------------------------
+
+import { planLead, selectLane, consecutiveUnanswered } from "@/lib/cadence/engine";
+import { resolveCadenceConfig } from "@/lib/cadence/config";
+import type { LeadState } from "@/lib/insights/lead-state";
+
+function leadState(overrides: Partial<LeadState> = {}): LeadState {
+  return {
+    lead_temp: "blocked",
+    blocker: "credit",
+    blocker_evidence: "got denied because of my credit score",
+    blocker_confidence: "high",
+    unblock_path: "Re-pull once the collection ages off",
+    unblock_trigger: "Collection drops off",
+    last_inbound_at: null,
+    last_outbound_at: null,
+    recommended_action: "hold",
+    why_now: "Denied on credit in July",
+    suppress_until: null,
+    ...overrides,
+  };
+}
+
+describe("lane selection", () => {
+  const cfg = resolveCadenceConfig(null);
+
+  it("routes in_market and warming to the in-market lane", () => {
+    expect(selectLane(leadState({ lead_temp: "in_market" }), 2, cfg)).toBe("in_market");
+    expect(selectLane(leadState({ lead_temp: "warming" }), 9, cfg)).toBe("in_market");
+  });
+
+  it("routes stalled and blocked to the blocked lane", () => {
+    expect(selectLane(leadState({ lead_temp: "stalled" }), 20, cfg)).toBe("blocked");
+    expect(selectLane(leadState({ lead_temp: "blocked" }), 40, cfg)).toBe("blocked");
+  });
+
+  it("routes unresponsive to its own lane", () => {
+    expect(selectLane(leadState({ lead_temp: "unresponsive" }), 40, cfg)).toBe("unresponsive");
+  });
+
+  it("trusts the classification over the lead's age", () => {
+    // A 90-day lead that is genuinely back in market belongs in the fast lane.
+    expect(selectLane(leadState({ lead_temp: "in_market" }), 90, cfg)).toBe("in_market");
+    // A 3-day lead already blocked on credit does not.
+    expect(selectLane(leadState({ lead_temp: "blocked" }), 3, cfg)).toBe("blocked");
+  });
+
+  it("falls back to age when the lead has never been classified", () => {
+    expect(selectLane(null, 5, cfg)).toBe("in_market");
+    expect(selectLane(null, 45, cfg)).toBe("blocked");
+  });
+
+  it("uses the configured in-market age boundary", () => {
+    const wide = resolveCadenceConfig({ in_market_max_age_days: 30 });
+    expect(selectLane(null, 25, wide)).toBe("in_market");
+    expect(selectLane(null, 25, cfg)).toBe("blocked");
+  });
+});
+
+// The headline behaviour change: the engine may recommend doing nothing.
+describe("blocked lane holds rather than manufacturing a touch", () => {
+  const old = contact({ created_at: "2026-06-20T16:00:00Z" }); // ~60 days
+
+  it("holds a blocked lead whose trigger has not fired", () => {
+    const plan = planLead(old, [], [], {
+      timeZone: LA,
+      now: THURSDAY_MORNING,
+      leadState: leadState({ recommended_action: "hold" }),
+    });
+    expect(plan.hold).toBe(true);
+    expect(plan.actions).toEqual([]);
+    expect(plan.lane).toBe("blocked");
+    expect(plan.holdReason).toContain("credit");
+  });
+
+  it("holds a blocked lead touched inside the configured interval", () => {
+    const recentTouch = [logEntry({ created_at: "2026-08-18T17:00:00Z" })]; // 2 days ago
+    const plan = planLead(old, recentTouch, [], {
+      timeZone: LA,
+      now: THURSDAY_MORNING,
+      leadState: leadState({ recommended_action: "email" }),
+    });
+    expect(plan.hold).toBe(true);
+    expect(plan.holdReason).toContain("21");
+  });
+
+  it("allows one touch once a meaningful interval has elapsed", () => {
+    const oldTouch = [logEntry({ created_at: "2026-07-01T17:00:00Z" })]; // ~50 days
+    const plan = planLead(old, oldTouch, [], {
+      timeZone: LA,
+      now: THURSDAY_MORNING,
+      leadState: leadState({ recommended_action: "email" }),
+    });
+    expect(plan.hold).toBe(false);
+    expect(plan.actions).toHaveLength(1);
+    // The message must speak to the blocker, not check in.
+    expect(plan.actions[0].priorityReason).toContain("credit");
+  });
+
+  it("holds a lead suppressed until a future date whatever the lane", () => {
+    const future = new Date(Date.now() + 14 * 86_400_000).toISOString();
+    const plan = planLead(contact(), [], [], {
+      timeZone: LA,
+      now: THURSDAY_MORNING,
+      leadState: leadState({ lead_temp: "in_market", recommended_action: "sms", suppress_until: future }),
+    });
+    expect(plan.hold).toBe(true);
+    expect(plan.holdReason).toContain("Suppressed");
+  });
+
+  it("records why it held, so the decision can be audited", () => {
+    const plan = planLead(old, [], [], {
+      timeZone: LA,
+      now: THURSDAY_MORNING,
+      leadState: leadState(),
+    });
+    expect(plan.inputs.rule).toBe("classifier_hold");
+    expect(plan.inputs.lane).toBe("blocked");
+    expect(plan.inputs.blocker).toBe("credit");
+  });
+});
+
+describe("unresponsive lane", () => {
+  const old = contact({ created_at: "2026-06-20T16:00:00Z" });
+
+  function unanswered(n: number): BonzoCommEntry[] {
+    return Array.from({ length: n }, (_, i) => ({
+      id: i,
+      content: `Attempt ${i}`,
+      direction: "outbound",
+      type: "sms",
+      created_at: new Date(Date.UTC(2026, 6, 1 + i)).toISOString(),
+    }));
+  }
+
+  it("counts consecutive unanswered outbound messages", () => {
+    expect(consecutiveUnanswered(unanswered(3))).toBe(3);
+  });
+
+  it("stops counting at the prospect's last reply", () => {
+    const comms: BonzoCommEntry[] = [
+      ...unanswered(2),
+      { id: 99, content: "still thinking", direction: "inbound", type: "sms", created_at: "2026-07-10T00:00:00Z" },
+      { id: 100, content: "no problem", direction: "outbound", type: "sms", created_at: "2026-07-11T00:00:00Z" },
+    ];
+    expect(consecutiveUnanswered(comms)).toBe(1);
+  });
+
+  it("recommends Adverse after the configured number of silent attempts", () => {
+    const plan = planLead(old, [], unanswered(5), {
+      timeZone: LA,
+      now: THURSDAY_MORNING,
+      leadState: leadState({ lead_temp: "unresponsive", recommended_action: "sms" }),
+    });
+    expect(plan.recommendAdverse).toBe(true);
+    expect(plan.hold).toBe(true);
+    expect(plan.holdReason).toContain("Adverse");
+  });
+
+  it("does not recommend Adverse before the threshold", () => {
+    const plan = planLead(old, [], unanswered(2), {
+      timeZone: LA,
+      now: THURSDAY_MORNING,
+      leadState: leadState({ lead_temp: "unresponsive", recommended_action: "sms" }),
+    });
+    expect(plan.recommendAdverse).toBe(false);
+  });
+
+  it("rotates channel, since the previous one demonstrably failed", () => {
+    const plan = planLead(old, [logEntry({ action_type: "sms", created_at: "2026-07-01T00:00:00Z" })], unanswered(2), {
+      timeZone: LA,
+      now: THURSDAY_MORNING,
+      leadState: leadState({ lead_temp: "unresponsive", recommended_action: "sms" }),
+    });
+    if (!plan.hold) {
+      expect(plan.actions[0].actionType).toBe("email");
+      expect(plan.actions[0].touchLabel).toContain("of 5");
+    }
+  });
+
+  it("honours a lowered threshold from config", () => {
+    const plan = planLead(old, [], unanswered(2), {
+      timeZone: LA,
+      now: THURSDAY_MORNING,
+      leadState: leadState({ lead_temp: "unresponsive", recommended_action: "sms" }),
+      config: resolveCadenceConfig({ unresponsive_max_consecutive: 2 }),
+    });
+    expect(plan.recommendAdverse).toBe(true);
+  });
+});
+
+describe("an unanswered inbound overrides every lane", () => {
+  it("puts a blocked lead back in the fast lane when they reply", () => {
+    const comms: BonzoCommEntry[] = [
+      { id: 1, content: "Actually my credit just cleared, can we look again?", direction: "inbound", type: "sms", created_at: "2026-08-20T15:00:00Z" },
+    ];
+    const plan = planLead(contact({ created_at: "2026-06-20T16:00:00Z" }), [], comms, {
+      timeZone: LA,
+      now: THURSDAY_MORNING,
+      leadState: leadState({ lead_temp: "blocked", recommended_action: "hold" }),
+    });
+    expect(plan.hold).toBe(false);
+    expect(plan.lane).toBe("in_market");
+    expect(plan.actions[0].priorityScore).toBe(1000);
+  });
+});
+
+describe("resolveCadenceConfig", () => {
+  it("returns defaults for null or garbage", () => {
+    expect(resolveCadenceConfig(null).unresponsive_max_consecutive).toBe(5);
+    expect(resolveCadenceConfig("nonsense").work_sunday).toBe(false);
+  });
+
+  it("merges partial config over defaults", () => {
+    const cfg = resolveCadenceConfig({ work_sunday: true });
+    expect(cfg.work_sunday).toBe(true);
+    expect(cfg.work_saturday).toBe(true);
+  });
+
+  it("ignores a field of the wrong type rather than taking the queue down", () => {
+    const cfg = resolveCadenceConfig({ unresponsive_max_consecutive: "lots" });
+    expect(cfg.unresponsive_max_consecutive).toBe(5);
+  });
+
+  it("clamps values that would make the engine nonsensical", () => {
+    expect(resolveCadenceConfig({ unresponsive_max_consecutive: 0 }).unresponsive_max_consecutive).toBe(1);
+    expect(resolveCadenceConfig({ blocked_min_days_between_touches: -5 }).blocked_min_days_between_touches).toBe(1);
   });
 });

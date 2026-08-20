@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
-import { calculateTodayActions, type QueueAction, type OutreachLogEntry, type BonzoCommEntry } from "@/lib/cadence/engine";
+import { planLead, type LeadPlan, type QueueAction, type OutreachLogEntry, type BonzoCommEntry } from "@/lib/cadence/engine";
+import { resolveCadenceConfig, type CadenceConfig } from "@/lib/cadence/config";
+import type { LeadState } from "@/lib/insights/lead-state";
 import { Contact } from "@/types/db";
 import { getUserTimezone, localDate, leadAgeDays } from "@/lib/time";
 import { getMortgageFields } from "@/lib/bonzo/client";
@@ -62,6 +64,7 @@ interface InsightsCache {
   bonzo_prospect_data: Record<string, unknown>;
   bonzo_communication: BonzoCommEntry[];
   ai_analysis: Record<string, unknown>;
+  lead_state: LeadState | null;
 }
 
 interface DraftResult {
@@ -144,7 +147,7 @@ const DRAFT_CHUNK_SIZE = 4;
 /** Chunks in flight at once. Small enough to stay clear of rate limits. */
 const DRAFT_CONCURRENCY = 3;
 
-type PendingAction = { contact: Contact; action: QueueAction; cache: InsightsCache };
+type PendingAction = { contact: Contact; action: QueueAction; cache: InsightsCache; plan: LeadPlan };
 
 /** Per-user drafting configuration, read once per generation. */
 export interface DraftSettings {
@@ -437,9 +440,13 @@ export async function POST(request: NextRequest) {
   // so they are read once and threaded through drafting.
   const { data: userSettings } = await serviceClient
     .from("user_settings")
-    .select("broker_display_name, broker_company, voice_profile")
+    .select("broker_display_name, broker_company, voice_profile, cadence_config")
     .eq("user_id", userId)
     .maybeSingle();
+
+  const cadenceConfig: CadenceConfig = resolveCadenceConfig(
+    userSettings?.cadence_config
+  );
 
   const draftSettings: DraftSettings = {
     brokerName: userSettings?.broker_display_name ?? "Eddie Canvasser",
@@ -493,7 +500,7 @@ export async function POST(request: NextRequest) {
       .order("created_at", { ascending: true }),
     serviceClient
       .from("insights_cache")
-      .select("contact_id, bonzo_prospect_data, bonzo_communication, ai_analysis")
+      .select("contact_id, bonzo_prospect_data, bonzo_communication, ai_analysis, lead_state")
       .in("contact_id", contactIds),
   ]);
 
@@ -528,15 +535,30 @@ export async function POST(request: NextRequest) {
   }
 
   const allActions: PendingAction[] = [];
+  /** Leads the engine deliberately stayed quiet on, surfaced in the response. */
+  const held: { contactId: string; name: string; reason: string; recommendAdverse: boolean }[] = [];
 
   for (const contact of contacts as Contact[]) {
     const history = outreachByContact[contact.id] ?? [];
     const cache = insightsByContact[contact.id];
     const comms = cache?.bonzo_communication ?? [];
 
-    const actions = calculateTodayActions(contact, history, comms, { timeZone });
+    const plan = planLead(contact, history, comms, {
+      timeZone,
+      config: cadenceConfig,
+      leadState: cache?.lead_state ?? null,
+    });
 
-    for (const action of actions) {
+    if (plan.hold) {
+      held.push({
+        contactId: contact.id,
+        name: contact.name,
+        reason: plan.holdReason ?? "No action due",
+        recommendAdverse: plan.recommendAdverse,
+      });
+    }
+
+    for (const action of plan.actions) {
       // Drop this action if an equivalent one was already actioned today.
       const key = `${contact.id}:${action.actionType}`;
       const covered = actionedCount.get(key) ?? 0;
@@ -547,7 +569,14 @@ export async function POST(request: NextRequest) {
       allActions.push({
         contact,
         action,
-        cache: cache ?? { contact_id: contact.id, bonzo_prospect_data: {}, bonzo_communication: [], ai_analysis: {} },
+        plan,
+        cache: cache ?? {
+          contact_id: contact.id,
+          bonzo_prospect_data: {},
+          bonzo_communication: [],
+          ai_analysis: {},
+          lead_state: null,
+        },
       });
     }
   }
@@ -568,7 +597,10 @@ export async function POST(request: NextRequest) {
       .eq("queue_date", todayStr)
       .order("priority_rank", { ascending: true });
 
-    return NextResponse.json({ queue: remaining ?? [], generated: true });
+    // An empty queue with no explanation is indistinguishable from a broken
+    // one. When the engine deliberately stayed quiet on every lead, say so and
+    // say why — that is the whole point of allowing it to do nothing.
+    return NextResponse.json({ queue: remaining ?? [], generated: true, held });
   }
 
   allActions.sort((a, b) => {
@@ -635,5 +667,5 @@ export async function POST(request: NextRequest) {
     .eq("queue_date", todayStr)
     .order("priority_rank", { ascending: true });
 
-  return NextResponse.json({ queue: queue ?? [], generated: true });
+  return NextResponse.json({ queue: queue ?? [], generated: true, held });
 }

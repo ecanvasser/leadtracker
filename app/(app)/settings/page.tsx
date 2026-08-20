@@ -3,6 +3,8 @@ import { redirect } from "next/navigation";
 import { TelegramSettings } from "@/components/settings/telegram-settings";
 import { VoiceProfileSettings } from "@/components/settings/voice-profile-settings";
 import type { VoiceProfile } from "@/lib/ai/voice-profile-types";
+import { CadenceSettings } from "@/components/settings/cadence-settings";
+import { resolveCadenceConfig } from "@/lib/cadence/config";
 
 export const instant = false;
 
@@ -24,7 +26,7 @@ export default async function SettingsPage() {
       .maybeSingle(),
     supabase
       .from("user_settings")
-      .select("voice_profile, voice_profile_generated_at")
+      .select("voice_profile, voice_profile_generated_at, cadence_config, broker_display_name, broker_company, timezone")
       .eq("user_id", userId)
       .maybeSingle(),
   ]);
@@ -38,6 +40,12 @@ export default async function SettingsPage() {
         </p>
       </div>
       <TelegramSettings userId={userId} initialLink={link} />
+      <CadenceSettings
+        initialConfig={resolveCadenceConfig(settings?.cadence_config)}
+        initialBrokerName={settings?.broker_display_name ?? "Eddie Canvasser"}
+        initialBrokerCompany={settings?.broker_company ?? "E Mortgage Capital"}
+        initialTimezone={settings?.timezone ?? "America/Los_Angeles"}
+      />
       <VoiceProfileSettings
         initialProfile={(settings?.voice_profile as VoiceProfile | null) ?? null}
         initialGeneratedAt={settings?.voice_profile_generated_at ?? null}
