@@ -23,6 +23,7 @@ function contact(overrides: Partial<Contact> = {}): Contact {
     bonzo_prospect_id: 5150,
     bonzo_email: "dana@example.com",
     insights_enabled: true,
+    phone: null,
     created_at: "2026-08-20T16:00:00Z", // 09:00 PDT
     updated_at: "2026-08-20T16:00:00Z",
     ...overrides,

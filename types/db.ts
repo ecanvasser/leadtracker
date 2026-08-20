@@ -80,6 +80,8 @@ export interface Contact {
   bonzo_prospect_id: number | null;
   bonzo_email: string | null;
   insights_enabled: boolean;
+  /** Captured from Bonzo at enrollment; call reminders read it. See 3.4. */
+  phone: string | null;
   created_at: string;
   updated_at: string;
 }

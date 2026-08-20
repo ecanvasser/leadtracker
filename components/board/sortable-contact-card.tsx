@@ -3,18 +3,23 @@
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { Contact } from "@/types/db";
+import type { BoardMeta } from "@/app/(app)/board/page";
 import { ContactCard } from "./contact-card";
 
 interface SortableContactCardProps {
   contact: Contact;
   taskCount: number;
+  meta?: BoardMeta;
   onClick: () => void;
+  onEnroll?: (contactId: string) => void;
 }
 
 export function SortableContactCard({
   contact,
   taskCount,
+  meta,
   onClick,
+  onEnroll,
 }: SortableContactCardProps) {
   const {
     attributes,
@@ -36,7 +41,9 @@ export function SortableContactCard({
       <ContactCard
         contact={contact}
         taskCount={taskCount}
+        meta={meta}
         onClick={onClick}
+        onEnroll={onEnroll}
       />
     </div>
   );

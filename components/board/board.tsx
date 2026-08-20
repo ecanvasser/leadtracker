@@ -19,27 +19,45 @@ import {
   PipelineStage,
   AllStages,
   PIPELINE_STAGES,
+  ALL_STAGES,
   STAGE_LABELS,
+  ADVERSE_REASONS,
+  ADVERSE_REASON_LABELS,
+  type AdverseReason,
 } from "@/types/db";
+import type { BoardMeta } from "@/app/(app)/board/page";
 import { StageColumn } from "./stage-column";
 import { TodoColumn } from "./todo-column";
 import { ContactCard } from "./contact-card";
 import { ContactDialog } from "@/components/contact/contact-dialog";
 import { toast } from "sonner";
 import { useRouter } from "next/navigation";
-import { Zap } from "lucide-react";
+import { Zap, Search, X } from "lucide-react";
 
 interface BoardProps {
   initialContacts: Contact[];
   initialTasks: TaskWithContact[];
   initialTaskCounts: Record<string, number>;
+  initialMeta: Record<string, BoardMeta>;
   userId: string;
 }
+
+/** Board filters. "excluded" surfaces hot leads the queue cannot see. */
+type BoardFilter = "all" | "excluded" | "blocked" | "in_market" | "untouched";
+
+const FILTER_LABELS: Record<BoardFilter, string> = {
+  all: "All",
+  excluded: "Not in queue",
+  in_market: "In market",
+  blocked: "Blocked",
+  untouched: "Never contacted",
+};
 
 export function Board({
   initialContacts,
   initialTasks,
   initialTaskCounts,
+  initialMeta,
   userId,
 }: BoardProps) {
   const [contacts, setContacts] = useState<Contact[]>(initialContacts);
@@ -48,6 +66,9 @@ export function Board({
   const [activeContact, setActiveContact] = useState<Contact | null>(null);
   const [showNewContact, setShowNewContact] = useState(false);
   const [queuePending, setQueuePending] = useState(0);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState<BoardFilter>("all");
+  const [adverseFor, setAdverseFor] = useState<Contact | null>(null);
   const supabase = createClient();
   const router = useRouter();
 
@@ -110,10 +131,117 @@ export function Board({
     };
   }, [supabase, refreshTasks]);
 
-  const contactsByStage = (stage: PipelineStage) =>
+  /**
+   * 4.5 — search and filter.
+   *
+   * Applied to what a column renders rather than to `contacts` itself, so drag
+   * and drop still resolves against the full set and a filtered-out card
+   * cannot be silently reordered.
+   */
+  const matchesQuery = (c: Contact): boolean => {
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      c.name.toLowerCase().includes(q) ||
+      (c.bonzo_email ?? "").toLowerCase().includes(q) ||
+      (c.phone ?? "").replace(/\D/g, "").includes(q.replace(/\D/g, "")) ||
+      (c.notes ?? "").toLowerCase().includes(q)
+    );
+  };
+
+  const matchesFilter = (c: Contact): boolean => {
+    const m = initialMeta[c.id];
+    switch (filter) {
+      case "excluded":
+        return c.stage === "hot_lead" && !c.insights_enabled;
+      case "in_market":
+        return m?.leadTemp === "in_market" || m?.leadTemp === "warming";
+      case "blocked":
+        return m?.leadTemp === "blocked" || m?.leadTemp === "stalled";
+      case "untouched":
+        return !m?.lastTouchAt;
+      default:
+        return true;
+    }
+  };
+
+  const contactsByStage = (stage: AllStages) =>
     contacts
-      .filter((c) => c.stage === stage)
+      .filter((c) => c.stage === stage && matchesQuery(c) && matchesFilter(c))
       .sort((a, b) => a.position - b.position);
+
+  const filteredCount = contacts.filter(
+    (c) => matchesQuery(c) && matchesFilter(c)
+  ).length;
+
+  /**
+   * Commits a lead to Adverse with its reason.
+   *
+   * Reason and stage move together: an adverse lead without a reason is a hole
+   * in the funnel record, and the detail form already required one.
+   */
+  async function confirmAdverse(contact: Contact, reason: AdverseReason) {
+    setAdverseFor(null);
+
+    const previous = { stage: contact.stage, position: contact.position };
+    setContacts((prev) =>
+      prev.map((c) =>
+        c.id === contact.id
+          ? { ...c, stage: "adverse" as AllStages, adverse_reason: reason }
+          : c
+      )
+    );
+
+    const { error } = await supabase
+      .from("contacts")
+      .update({ stage: "adverse", adverse_reason: reason })
+      .eq("id", contact.id);
+
+    if (error) {
+      setContacts((prev) =>
+        prev.map((c) => (c.id === contact.id ? { ...c, ...previous } : c))
+      );
+      toast.error("Could not move that lead to Adverse");
+    } else {
+      toast.success(`${contact.name} moved to Adverse`, {
+        description: ADVERSE_REASON_LABELS[reason],
+      });
+    }
+  }
+
+  /** 4.7 — one-click enrollment for a hot lead the queue cannot see. */
+  async function handleEnroll(contactId: string) {
+    const contact = contacts.find((c) => c.id === contactId);
+    if (!contact) return;
+
+    if (!contact.bonzo_email) {
+      toast.error("No Bonzo email on this lead", {
+        description: "Open it and connect a Bonzo prospect first.",
+      });
+      router.push(`/contacts/${contactId}`);
+      return;
+    }
+
+    // Optimistic: the badge disappearing immediately is the whole point of a
+    // one-click control.
+    setContacts((prev) =>
+      prev.map((c) => (c.id === contactId ? { ...c, insights_enabled: true } : c))
+    );
+
+    const { error } = await supabase
+      .from("contacts")
+      .update({ insights_enabled: true })
+      .eq("id", contactId);
+
+    if (error) {
+      setContacts((prev) =>
+        prev.map((c) => (c.id === contactId ? { ...c, insights_enabled: false } : c))
+      );
+      toast.error("Could not enroll that lead");
+    } else {
+      toast.success(`${contact.name} is now in the queue`);
+    }
+  }
 
   function handleDragStart(event: DragStartEvent) {
     const contact = contacts.find((c) => c.id === event.active.id);
@@ -151,10 +279,18 @@ export function Board({
     if (!contact) return;
 
     const overId = over.id as string;
-    const isStageColumn = PIPELINE_STAGES.includes(overId as PipelineStage);
-    const targetStage = isStageColumn
-      ? (overId as PipelineStage)
+    const isStageColumn = ALL_STAGES.includes(overId as AllStages);
+    const targetStage: AllStages = isStageColumn
+      ? (overId as AllStages)
       : contacts.find((c) => c.id === overId)?.stage ?? contact.stage;
+
+    // 4.6 — dropping onto Adverse asks for the reason inline rather than
+    // sending you to the detail page for a dropdown and a Save. The move is
+    // committed by the picker so a cancel leaves the lead where it was.
+    if (targetStage === "adverse" && contact.stage !== "adverse") {
+      setAdverseFor(contact);
+      return;
+    }
 
     const stageContacts = contacts
       .filter((c) => c.stage === targetStage && c.id !== contactId)
@@ -231,9 +367,52 @@ export function Board({
 
   return (
     <>
-      <div className="flex items-center justify-between px-4 md:px-6 py-3 border-b border-border/50">
-        <h1 className="text-sm font-medium text-muted-foreground">Pipeline</h1>
-        <div className="flex items-center gap-2">
+      <div className="flex items-center gap-3 px-4 md:px-6 py-3 border-b border-border/50 flex-wrap">
+        <h1 className="text-sm font-medium text-muted-foreground shrink-0">Pipeline</h1>
+
+        {/* 4.5 — there was no search anywhere in the app. */}
+        <div className="relative flex-1 min-w-[180px] max-w-xs">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search name, email, phone, notes"
+            className="w-full h-8 pl-8 pr-7 rounded-md border border-border/60 bg-transparent text-xs outline-none focus:border-border"
+          />
+          {search && (
+            <button
+              onClick={() => setSearch("")}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              aria-label="Clear search"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+
+        <div className="flex items-center gap-1 flex-wrap">
+          {(Object.keys(FILTER_LABELS) as BoardFilter[]).map((f) => (
+            <button
+              key={f}
+              onClick={() => setFilter(f)}
+              className={`px-2 py-1 rounded-md text-[11px] transition-colors ${
+                filter === f
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:bg-accent"
+              }`}
+            >
+              {FILTER_LABELS[f]}
+            </button>
+          ))}
+        </div>
+
+        {(search || filter !== "all") && (
+          <span className="text-[11px] text-muted-foreground tabular-nums">
+            {filteredCount} shown
+          </span>
+        )}
+
+        <div className="flex items-center gap-2 ml-auto">
           <button
             onClick={() => router.push("/daily")}
             className="relative text-sm font-medium px-3 py-1.5 rounded-md border border-border hover:bg-accent transition-colors flex items-center gap-1.5"
@@ -271,9 +450,25 @@ export function Board({
                 label={STAGE_LABELS[stage]}
                 contacts={contactsByStage(stage)}
                 taskCounts={taskCounts}
+                meta={initialMeta}
                 onContactClick={(id) => router.push(`/contacts/${id}`)}
+                onEnroll={handleEnroll}
               />
             ))}
+
+            {/* 4.6 — Adverse as a droppable column. Marking a lead dead was
+                the slowest interaction in the app despite being the most
+                common outcome in the funnel. */}
+            <StageColumn
+              stage="adverse"
+              label={STAGE_LABELS.adverse}
+              contacts={contactsByStage("adverse")}
+              taskCounts={taskCounts}
+              meta={initialMeta}
+              muted
+              onContactClick={(id) => router.push(`/contacts/${id}`)}
+              onEnroll={handleEnroll}
+            />
             <TodoColumn
               tasks={tasks}
               onCompleteTask={handleCompleteTask}
@@ -286,12 +481,53 @@ export function Board({
               <ContactCard
                 contact={activeContact}
                 taskCount={taskCounts[activeContact.id] || 0}
+                meta={initialMeta[activeContact.id]}
                 isDragging
               />
             ) : null}
           </DragOverlay>
         </DndContext>
       </div>
+
+      {/* 4.6 — the reason picker for an Adverse drop.
+          Marking a lead dead was the slowest interaction in the app: open the
+          detail page, change a dropdown, pick a reason, click Save. It is now
+          a drag and one click, and cancelling leaves the lead where it was. */}
+      {adverseFor && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          onClick={() => setAdverseFor(null)}
+        >
+          <div
+            className="w-[320px] rounded-xl border border-border bg-card p-4 shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="text-sm font-medium mb-1">
+              Move {adverseFor.name} to Adverse
+            </p>
+            <p className="text-xs text-muted-foreground mb-3">
+              Why did this one not work out?
+            </p>
+            <div className="grid grid-cols-2 gap-1.5">
+              {ADVERSE_REASONS.map((reason) => (
+                <button
+                  key={reason}
+                  onClick={() => confirmAdverse(adverseFor, reason)}
+                  className="rounded-md border border-border/60 px-2 py-1.5 text-xs hover:bg-accent transition-colors text-left"
+                >
+                  {ADVERSE_REASON_LABELS[reason]}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => setAdverseFor(null)}
+              className="mt-3 w-full text-xs text-muted-foreground hover:text-foreground"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {showNewContact && (
         <ContactDialog
@@ -300,6 +536,7 @@ export function Board({
           open={showNewContact}
           onOpenChange={setShowNewContact}
           onCreated={handleContactCreated}
+          onDeleted={handleContactDeleted}
           onTasksChanged={refreshTasks}
         />
       )}
