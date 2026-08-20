@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { toast } from "sonner";
@@ -22,6 +23,8 @@ import {
   ArrowLeft,
   Zap,
   Clock,
+  PauseCircle,
+  Keyboard,
   AlertTriangle,
   CalendarCheck,
 } from "lucide-react";
@@ -35,6 +38,35 @@ interface QueueContact {
   created_at: string;
   insights_enabled: boolean;
 }
+
+/** How long an action can be taken back before it reaches the server. */
+const UNDO_WINDOW_MS = 10_000;
+
+/**
+ * An action the UI has already applied but has not yet sent.
+ *
+ * Holding the request for ten seconds is what makes Undo honest: a delivered
+ * SMS cannot be recalled, so the only real undo is one that happens before the
+ * message leaves.
+ */
+interface PendingAction {
+  item: QueueItem;
+  action: "send" | "edit_send" | "skip" | "done" | "snooze" | "hold";
+  editedMessage?: string;
+  editedSubject?: string;
+  snoozeOption?: string;
+  holdDays?: number;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+const ACTION_LABELS: Record<PendingAction["action"], string> = {
+  send: "Sending",
+  edit_send: "Sending edited",
+  skip: "Skipped",
+  done: "Marked done",
+  snooze: "Snoozed",
+  hold: "Held",
+};
 
 interface QueueItem {
   id: string;
@@ -93,10 +125,6 @@ interface QueueSummary {
   done: number;
   pending: number;
   generated: boolean;
-}
-
-interface DailyQueueProps {
-  userId: string;
 }
 
 function getPriorityStyle(reason: string): {
@@ -160,18 +188,24 @@ function getLeadAge(createdAt: string): string {
   return `${days} days`;
 }
 
-export function DailyQueue({ userId }: DailyQueueProps) {
+export function DailyQueue() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [currentItem, setCurrentItem] = useState<QueueItem | null>(null);
   const [summary, setSummary] = useState<QueueSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
-  const [actioning, setActioning] = useState(false);
   const [editedMessage, setEditedMessage] = useState("");
   const [isEditing, setIsEditing] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
   const [traceOpen, setTraceOpen] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
+  const [snoozeOpen, setSnoozeOpen] = useState(false);
+  const [undoable, setUndoable] = useState<PendingAction | null>(null);
+  const pendingRef = useRef<PendingAction | null>(null);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [reviseOpen, setReviseOpen] = useState(false);
+  const [reviseInstruction, setReviseInstruction] = useState("");
+  const [revising, setRevising] = useState(false);
   const router = useRouter();
 
   const loadQueue = useCallback(async () => {
@@ -250,62 +284,322 @@ export function DailyQueue({ userId }: DailyQueueProps) {
     loadSummary();
   }
 
-  async function handleAction(action: "send" | "edit_send" | "skip" | "done") {
-    if (!currentItem) return;
-    setActioning(true);
+  type QueueActionKind =
+    | "send"
+    | "edit_send"
+    | "skip"
+    | "done"
+    | "snooze"
+    | "hold";
 
+  /**
+   * Commits a deferred action to the server.
+   *
+   * Split from handleAction because the UI advances immediately and the
+   * request fires ten seconds later, once the undo window closes.
+   */
+  const commitAction = useCallback(
+    async (p: PendingAction) => {
+      try {
+        const res = await fetch("/api/daily-queue/action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            queueItemId: p.item.id,
+            action: p.action,
+            editedMessage: p.editedMessage,
+            editedSubject: p.editedSubject,
+            snoozeOption: p.snoozeOption,
+            holdDays: p.holdDays,
+          }),
+        });
+        const data = await res.json();
+
+        if (data.error) {
+          // A refused send must not disappear. Put the card back so the
+          // message can be fixed and retried rather than silently lost.
+          toast.error(data.error, { duration: 8000 });
+          setQueue((prev) =>
+            prev.map((i) => (i.id === p.item.id ? { ...i, status: "pending" } : i))
+          );
+          setCurrentItem((cur) => cur ?? p.item);
+          return;
+        }
+
+        if (p.action === "send" || p.action === "edit_send") {
+          toast.success(data.outcome?.receipt ?? "Sent");
+        }
+      } catch {
+        toast.error("Action failed — the card has been restored");
+        setCurrentItem((cur) => cur ?? p.item);
+      } finally {
+        loadSummary();
+      }
+    },
+    [loadSummary]
+  );
+
+  /** Fires any outstanding action now, without waiting out the undo window. */
+  const flushPending = useCallback(() => {
+    const p = pendingRef.current;
+    if (!p) return;
+    clearTimeout(p.timer);
+    pendingRef.current = null;
+    setUndoable(null);
+    void commitAction(p);
+  }, [commitAction]);
+
+  /**
+   * Actions a card.
+   *
+   * The queue advances immediately and the request is held for ten seconds, so
+   * Undo is a real cancellation rather than a reversal. That matters most for
+   * sends: a delivered SMS cannot be recalled, so the only honest undo is one
+   * that happens before it leaves.
+   */
+  async function handleAction(
+    action: QueueActionKind,
+    opts: { snoozeOption?: string; holdDays?: number } = {}
+  ) {
+    if (!currentItem) return;
+
+    // Only one undo window at a time; starting a second commits the first.
+    flushPending();
+
+    const item = currentItem;
+    const pending: PendingAction = {
+      item,
+      action,
+      editedMessage: action === "edit_send" ? editedMessage : undefined,
+      editedSubject: action === "edit_send" ? emailSubject : undefined,
+      snoozeOption: opts.snoozeOption,
+      holdDays: opts.holdDays,
+      timer: setTimeout(() => {
+        const p = pendingRef.current;
+        if (!p) return;
+        pendingRef.current = null;
+        setUndoable(null);
+        void commitAction(p);
+      }, UNDO_WINDOW_MS),
+    };
+    pendingRef.current = pending;
+    setUndoable(pending);
+
+    // Advance optimistically so triage stays fast.
+    const remaining = queue.filter(
+      (i) => i.status === "pending" && i.id !== item.id
+    );
+    setTransitioning(true);
+    setTimeout(() => {
+      setCurrentItem(remaining[0] ?? null);
+      setTransitioning(false);
+    }, 200);
+
+    setQueue((prev) =>
+      prev.map((i) =>
+        i.id === item.id
+          ? { ...i, status: action === "snooze" ? "pending" : "actioned" }
+          : i
+      )
+    );
+
+    toast(ACTION_LABELS[action], {
+      description: "Undo within 10 seconds",
+      duration: UNDO_WINDOW_MS,
+      action: { label: "Undo", onClick: () => handleUndo() },
+    });
+  }
+
+  /** Cancels the outstanding action and restores the card. */
+  function handleUndo() {
+    const p = pendingRef.current;
+    if (!p) {
+      toast("Nothing to undo");
+      return;
+    }
+    clearTimeout(p.timer);
+    pendingRef.current = null;
+    setUndoable(null);
+
+    setQueue((prev) =>
+      prev.map((i) => (i.id === p.item.id ? { ...i, status: "pending" } : i))
+    );
+    setCurrentItem(p.item);
+    setIsEditing(false);
+    toast.success("Undone");
+  }
+
+  /**
+   * Flush an outstanding action if the page goes away.
+   *
+   * Without this, closing the tab inside the undo window would drop the
+   * request entirely. The item stays pending server-side either way, so the
+   * failure mode is a card offered again rather than a message lost — but
+   * flushing makes the common case behave as expected.
+   */
+  useEffect(() => {
+    const flush = () => flushPending();
+    window.addEventListener("beforeunload", flush);
+    return () => {
+      window.removeEventListener("beforeunload", flush);
+      flush();
+    };
+  }, [flushPending]);
+
+  /**
+   * Keyboard triage.
+   *
+   * This is a card loop; every action being a mouse click is the main thing
+   * slowing it down. Ignored while typing in the editor, and while a modifier
+   * is held so browser shortcuts still work.
+   */
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+      const el = e.target as HTMLElement | null;
+      const typing =
+        el &&
+        (el.tagName === "INPUT" ||
+          el.tagName === "TEXTAREA" ||
+          el.isContentEditable);
+
+      // Escape leaves the editor; otherwise typing swallows every shortcut.
+      if (typing) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setIsEditing(false);
+          (el as HTMLElement).blur();
+        }
+        return;
+      }
+
+      // Undo works even with no card showing — that is rather the point.
+      if (e.key.toLowerCase() === "u") {
+        e.preventDefault();
+        handleUndo();
+        return;
+      }
+
+      if (snoozeOpen) {
+        const map: Record<string, string> = { "1": "2h", "2": "am", "3": "3d", "4": "wk" };
+        if (map[e.key]) {
+          e.preventDefault();
+          setSnoozeOpen(false);
+          handleAction("snooze", { snoozeOption: map[e.key] });
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setSnoozeOpen(false);
+          return;
+        }
+      }
+
+      if (!currentItem) return;
+
+      switch (e.key.toLowerCase()) {
+        case "s":
+          e.preventDefault();
+          handleAction(currentItem.action_type === "call" ? "done" : "send");
+          break;
+        case "e":
+          e.preventDefault();
+          if (currentItem.action_type !== "call") setIsEditing(true);
+          break;
+        case "r":
+          e.preventDefault();
+          if (currentItem.action_type !== "call") setReviseOpen(true);
+          break;
+        case "k":
+          e.preventDefault();
+          handleAction("skip");
+          break;
+        case "z":
+          e.preventDefault();
+          setSnoozeOpen((v) => !v);
+          break;
+        case "h":
+          e.preventDefault();
+          handleAction("hold", { holdDays: 14 });
+          break;
+        // j / arrows move through the queue without actioning anything.
+        case "j":
+        case "arrowdown":
+          e.preventDefault();
+          stepCard(1);
+          break;
+        case "arrowup":
+          e.preventDefault();
+          stepCard(-1);
+          break;
+        case "?":
+          e.preventDefault();
+          setShortcutsOpen((v) => !v);
+          break;
+      }
+    }
+
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  /** Sends a redraft instruction through the shared, validated revise path. */
+  async function handleRevise() {
+    if (!currentItem || !reviseInstruction.trim()) return;
+    setRevising(true);
     try {
-      const res = await fetch("/api/daily-queue/action", {
+      const res = await fetch("/api/daily-queue/revise", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           queueItemId: currentItem.id,
-          action,
-          editedMessage: action === "edit_send" ? editedMessage : undefined,
-          editedSubject: action === "edit_send" ? emailSubject : undefined,
+          instruction: reviseInstruction.trim(),
         }),
       });
       const data = await res.json();
 
-      // A refused send leaves the card exactly where it was, so the message
-      // can be fixed and retried rather than lost.
       if (data.error) {
         toast.error(data.error);
-        setActioning(false);
-        return;
-      }
-
-      if (action === "send" || action === "edit_send") {
-        toast.success(data.outcome?.receipt ?? "Sent");
-      } else if (action === "skip") {
-        toast("Skipped", { description: "Moving to next" });
       } else {
-        toast.success("Marked as done");
-      }
+        const updated = {
+          ...currentItem,
+          draft_message: data.body,
+          email_subject: data.subject ?? currentItem.email_subject,
+        };
+        setCurrentItem(updated);
+        setQueue((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
+        setEditedMessage(data.body);
+        setReviseOpen(false);
+        setReviseInstruction("");
 
-      setTransitioning(true);
-      setTimeout(() => {
-        if (data.next) {
-          setCurrentItem(data.next);
+        if (data.validated) {
+          toast.success("Redrafted");
         } else {
-          setCurrentItem(null);
+          // Shown rather than withheld, but flagged — the broker asked for
+          // this specific change and should see the result either way.
+          toast.warning("Redrafted, but it broke a rule", {
+            description: data.violations?.[0] ?? "Check it before sending",
+            duration: 8000,
+          });
         }
-        setTransitioning(false);
-      }, 300);
-
-      setQueue((prev) =>
-        prev.map((item) =>
-          item.id === currentItem.id
-            ? { ...item, status: action === "skip" ? "skipped" : "sent" }
-            : item
-        )
-      );
+      }
     } catch {
-      toast.error("Action failed");
+      toast.error("Redraft failed");
     }
+    setRevising(false);
+  }
 
-    setActioning(false);
-    loadSummary();
+  /** Moves through pending cards without actioning them. */
+  function stepCard(delta: number) {
+    const pending = queue.filter((i) => i.status === "pending");
+    if (pending.length === 0) return;
+    const idx = pending.findIndex((i) => i.id === currentItem?.id);
+    const next = pending[(idx + delta + pending.length) % pending.length];
+    if (next) {
+      setCurrentItem(next);
+      setIsEditing(false);
+    }
   }
 
   const today = new Date().toLocaleDateString("en-US", {
@@ -348,7 +642,7 @@ export function DailyQueue({ userId }: DailyQueueProps) {
             ) : (
               <>
                 <Zap className="h-4 w-4 mr-2" />
-                Generate today's queue
+                Generate today&apos;s queue
               </>
             )}
           </Button>
@@ -405,12 +699,71 @@ export function DailyQueue({ userId }: DailyQueueProps) {
 
   return (
     <div className="flex-1 flex flex-col">
+      {/* Undo bar. Visible for the ten seconds the action is held before it
+          reaches the server, so the window is something you can see rather
+          than something you have to remember. */}
+      {undoable && (
+        <div className="bg-muted/60 border-b border-border/50 px-4 md:px-6 py-2 flex items-center gap-3">
+          <span className="text-xs text-muted-foreground">
+            {ACTION_LABELS[undoable.action]} · {undoable.item.contacts.name}
+          </span>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 text-xs"
+            onClick={handleUndo}
+          >
+            <ArrowLeft className="h-3 w-3 mr-1" />
+            Undo
+            <kbd className="ml-1.5 text-[10px] text-muted-foreground">U</kbd>
+          </Button>
+        </div>
+      )}
+
+      {shortcutsOpen && (
+        <div className="bg-muted/40 border-b border-border/50 px-4 md:px-6 py-3">
+          <div className="flex flex-wrap gap-x-5 gap-y-1.5 text-[11px] text-muted-foreground">
+            {(
+              [
+                ["S", "Send"],
+                ["E", "Edit"],
+                ["R", "Redraft"],
+                ["K", "Skip"],
+                ["Z", "Snooze"],
+                ["H", "Hold 2 weeks"],
+                ["U", "Undo"],
+                ["J / ↓", "Next card"],
+                ["↑", "Previous card"],
+                ["Esc", "Leave editor"],
+                ["?", "This list"],
+              ] as const
+            ).map(([key, label]) => (
+              <span key={key} className="flex items-center gap-1.5">
+                <kbd className="px-1.5 py-0.5 rounded bg-background border border-border/60 text-[10px] font-mono">
+                  {key}
+                </kbd>
+                {label}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Top bar */}
       <div className="border-b border-border/50 px-4 md:px-6 py-3">
         <div className="flex items-center justify-between mb-2">
           <div>
             <h1 className="text-sm font-medium">{today}</h1>
           </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="ml-auto mr-2 h-7 text-xs text-muted-foreground"
+            onClick={() => setShortcutsOpen((v) => !v)}
+            title="Keyboard shortcuts (?)"
+          >
+            <Keyboard className="h-3.5 w-3.5" />
+          </Button>
           <Button
             size="sm"
             variant="outline"
@@ -587,44 +940,103 @@ export function DailyQueue({ userId }: DailyQueueProps) {
                 )}
 
                 {/* Action buttons */}
+                {/* Snooze options — same intervals as the Telegram card, so
+                    the two surfaces behave identically. */}
+                {snoozeOpen && (
+                  <div className="flex gap-1.5 flex-wrap pt-1">
+                    {(
+                      [
+                        ["2h", "2 hours", "1"],
+                        ["am", "Tomorrow AM", "2"],
+                        ["3d", "3 days", "3"],
+                        ["wk", "Next week", "4"],
+                      ] as const
+                    ).map(([value, label, key]) => (
+                      <Button
+                        key={value}
+                        variant="secondary"
+                        size="sm"
+                        className="text-xs"
+                        onClick={() => {
+                          setSnoozeOpen(false);
+                          handleAction("snooze", { snoozeOption: value });
+                        }}
+                      >
+                        <span className="text-muted-foreground mr-1.5">{key}</span>
+                        {label}
+                      </Button>
+                    ))}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-xs text-muted-foreground"
+                      onClick={() => {
+                        setSnoozeOpen(false);
+                        handleAction("hold", { holdDays: 14 });
+                      }}
+                      title="Stop working this lead for two weeks (H)"
+                    >
+                      <PauseCircle className="h-3.5 w-3.5 mr-1" />
+                      Hold 2 weeks
+                    </Button>
+                  </div>
+                )}
+
+                {/* Redraft — a plain instruction, run through the same
+                    constraints as the first draft. */}
+                {reviseOpen && currentItem.action_type !== "call" && (
+                  <div className="flex gap-2 pt-1">
+                    <Input
+                      autoFocus
+                      value={reviseInstruction}
+                      placeholder='e.g. "shorter", "mention the credit timeline"'
+                      onChange={(e) => setReviseInstruction(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") handleRevise();
+                        if (e.key === "Escape") setReviseOpen(false);
+                      }}
+                      className="text-sm"
+                    />
+                    <Button
+                      size="sm"
+                      onClick={handleRevise}
+                      disabled={revising || !reviseInstruction.trim()}
+                    >
+                      {revising ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        "Redraft"
+                      )}
+                    </Button>
+                  </div>
+                )}
+
                 <div className="flex gap-2 pt-1">
                   {currentItem.action_type === "call" ? (
                     <Button
                       className="flex-1"
                       onClick={() => handleAction("done")}
-                      disabled={actioning}
+                     
                     >
-                      {actioning ? (
-                        <Loader2 className="h-4 w-4 animate-spin mr-1.5" />
-                      ) : (
-                        <Phone className="h-4 w-4 mr-1.5" />
-                      )}
+                      <Phone className="h-4 w-4 mr-1.5" />
                       Log call
                     </Button>
                   ) : isEditing && editedMessage !== messageBody ? (
                     <Button
                       className="flex-1"
                       onClick={() => handleAction("edit_send")}
-                      disabled={actioning}
+                     
                     >
-                      {actioning ? (
-                        <Loader2 className="h-4 w-4 animate-spin mr-1.5" />
-                      ) : (
-                        <Send className="h-4 w-4 mr-1.5" />
-                      )}
+                      <Send className="h-4 w-4 mr-1.5" />
                       Send edited
                     </Button>
                   ) : (
                     <Button
                       className="flex-1"
                       onClick={() => handleAction("send")}
-                      disabled={actioning}
+                     
                     >
-                      {actioning ? (
-                        <Loader2 className="h-4 w-4 animate-spin mr-1.5" />
-                      ) : (
-                        <Send className="h-4 w-4 mr-1.5" />
-                      )}
+                      <Send className="h-4 w-4 mr-1.5" />
                       Send
                     </Button>
                   )}
@@ -632,11 +1044,37 @@ export function DailyQueue({ userId }: DailyQueueProps) {
                   <Button
                     variant="outline"
                     onClick={() => handleAction("skip")}
-                    disabled={actioning}
+                   
+                    title="Skip this touch (K)"
                   >
                     <SkipForward className="h-4 w-4 mr-1.5" />
                     Skip
                   </Button>
+
+                  {/* Snooze — "not right now". Distinct from skip, which is
+                      "not this touch", and from hold, which is "stop working
+                      this lead for a while". */}
+                  <Button
+                    variant="outline"
+                    onClick={() => setSnoozeOpen((v) => !v)}
+                   
+                    title="Snooze (Z)"
+                  >
+                    <Clock className="h-4 w-4 mr-1.5" />
+                    Snooze
+                  </Button>
+
+                  {currentItem.action_type !== "call" && (
+                    <Button
+                      variant="outline"
+                      onClick={() => setReviseOpen((v) => !v)}
+                     
+                      title="Redraft (R)"
+                    >
+                      <RefreshCw className="h-4 w-4 mr-1.5" />
+                      Redraft
+                    </Button>
+                  )}
 
                   {currentItem.action_type !== "call" && (
                     <Button
@@ -644,7 +1082,7 @@ export function DailyQueue({ userId }: DailyQueueProps) {
                       size="sm"
                       className="text-xs text-muted-foreground"
                       onClick={() => handleAction("done")}
-                      disabled={actioning}
+                     
                     >
                       Already handled
                     </Button>

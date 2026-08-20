@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { redirect } from "next/navigation";
 import { DailyQueue } from "./daily-queue";
 
 export const instant = false;
@@ -6,7 +7,7 @@ export const instant = false;
 export default async function DailyPage() {
   const supabase = await createClient();
   const { data: authData } = await supabase.auth.getClaims();
-  const userId = authData?.claims?.sub as string;
+  if (!authData?.claims) redirect("/login");
 
-  return <DailyQueue userId={userId} />;
+  return <DailyQueue />;
 }
