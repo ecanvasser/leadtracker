@@ -37,11 +37,14 @@ export function StageColumn({
 
   return (
     <div
-      className={`flex flex-col min-w-[260px] w-[260px] md:flex-1 rounded-xl border transition-colors ${
+      // overflow-hidden so cards are clipped by the rounded border instead of
+      // painting over it, and min-h-0 further down so the list scrolls rather
+      // than growing past the column.
+      className={`flex flex-col min-w-[260px] w-[260px] md:flex-1 overflow-hidden rounded-xl border transition-colors ${
         muted ? "border-border/30 bg-muted/10" : "border-border/50 bg-muted/30"
       } ${isOver ? "bg-destructive/10 border-destructive/40" : ""}`}
     >
-      <div className="flex items-center justify-between px-3 py-2.5 border-b border-border/50">
+      <div className="shrink-0 flex items-center justify-between px-3 py-2.5 border-b border-border/50">
         <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           {label}
         </h2>
@@ -49,7 +52,10 @@ export function StageColumn({
           {contacts.length}
         </span>
       </div>
-      <ScrollArea className="flex-1">
+      {/* min-h-0 is load-bearing: a flex item defaults to min-height:auto,
+          so without it this grows to fit its content and the cards spill out
+          of the column instead of scrolling inside it. */}
+      <ScrollArea className="flex-1 min-h-0">
         <div ref={setNodeRef} className="p-2 space-y-2 min-h-[60px]">
           <SortableContext
             items={contacts.map((c) => c.id)}

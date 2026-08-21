@@ -434,7 +434,7 @@ export function Board({
         </div>
       </div>
 
-      <div className="flex-1 overflow-x-auto">
+      <div className="flex-1 min-h-0 overflow-x-auto">
         <DndContext
           sensors={sensors}
           collisionDetection={closestCenter}
@@ -442,7 +442,11 @@ export function Board({
           onDragOver={handleDragOver}
           onDragEnd={handleDragEnd}
         >
-          <div className="flex gap-4 p-4 md:p-6 min-h-0 h-[calc(100vh-7.5rem)]">
+          {/* h-full rather than a calc against the viewport. The old
+              calc(100vh-7.5rem) assumed a fixed header height, which the undo
+              bar and shortcuts panel can now change — the columns would then
+              be sized against a header that is no longer that tall. */}
+          <div className="flex gap-4 p-4 md:p-6 h-full min-h-0">
             {PIPELINE_STAGES.map((stage) => (
               <StageColumn
                 key={stage}

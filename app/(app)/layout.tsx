@@ -20,7 +20,12 @@ export default async function AppLayout({
   }
 
   return (
-    <div className="min-h-screen flex flex-col">
+    // h-dvh, not min-h-screen. A min-height gives the flex chain no definite
+    // height to divide, so every flex-1 below just grew to fit its content —
+    // which is why the board columns spilled past their own border and why
+    // contact-detail's overflow-y-auto panes never actually scrolled. dvh
+    // rather than vh so mobile browser chrome is accounted for.
+    <div className="h-dvh flex flex-col overflow-hidden">
       <nav className="border-b border-border/50 h-14 flex items-center px-4 md:px-6 shrink-0">
         <div className="flex items-center gap-6 w-full">
           <Link
@@ -36,7 +41,10 @@ export default async function AppLayout({
           </div>
         </div>
       </nav>
-      <main className="flex-1 flex flex-col">
+      {/* Scrolls by default so ordinary pages behave normally. A page that
+          manages its own scrolling (the board, contact detail) fills exactly
+          this height, so this never scrolls for them. */}
+      <main className="flex-1 min-h-0 flex flex-col overflow-y-auto">
         <PageTransition>{children}</PageTransition>
       </main>
       <Toaster />

@@ -17,7 +17,7 @@ export function TodoColumn({
   onTaskClick,
 }: TodoColumnProps) {
   return (
-    <div className="flex flex-col min-w-[260px] w-[260px] md:flex-1 rounded-xl border border-border/50 bg-muted/30">
+    <div className="flex flex-col min-w-[260px] w-[260px] md:flex-1 overflow-hidden rounded-xl border border-border/50 bg-muted/30">
       <div className="flex items-center justify-between px-3 py-2.5 border-b border-border/50">
         <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           To-Do
@@ -26,7 +26,7 @@ export function TodoColumn({
           {tasks.length}
         </span>
       </div>
-      <ScrollArea className="flex-1">
+      <ScrollArea className="flex-1 min-h-0">
         <div className="p-2 space-y-2 min-h-[60px]">
           {tasks.map((task) => (
             <TaskCard

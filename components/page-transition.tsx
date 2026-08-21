@@ -19,7 +19,7 @@ export function PageTransition({ children }: { children: React.ReactNode }) {
 
   return (
     <div
-      className="flex-1 flex flex-col transition-all duration-300 ease-out"
+      className="flex-1 min-h-0 flex flex-col transition-all duration-300 ease-out"
       style={{
         opacity: visible ? 1 : 0,
         transform: visible ? "translateY(0)" : "translateY(8px)",
