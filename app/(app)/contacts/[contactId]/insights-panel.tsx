@@ -3,7 +3,7 @@
 import { isOutbound } from "@/lib/bonzo/client";
 
 import { useState, useEffect } from "react";
-import { Contact, Task } from "@/types/db";
+import { Contact, Task, isQueueEligible } from "@/types/db";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -271,14 +271,14 @@ export function InsightsPanel({
               Connect this lead to Bonzo to get AI-powered follow-up
               recommendations.
             </p>
-            {contact.stage !== "hot_lead" && (
+            {!isQueueEligible(contact.stage) && (
               <p className="text-xs text-muted-foreground/70 mt-1">
                 Insights enrollment is available for Hot Leads only.
               </p>
             )}
           </div>
 
-          {contact.stage === "hot_lead" && (
+          {isQueueEligible(contact.stage) && (
             <div className="space-y-4">
               <div className="flex gap-2">
                 <Input

@@ -7,6 +7,7 @@ export const LOAN_TYPES = [
   "purchase",
   "hard_money",
   "fast_50",
+  "reverse",
 ] as const;
 export type LoanType = (typeof LOAN_TYPES)[number];
 
@@ -15,6 +16,7 @@ export type CRM = (typeof CRM_OPTIONS)[number];
 
 export const PIPELINE_STAGES = [
   "hot_lead",
+  "needs_quote",
   "app_in",
   "submission",
   "processing",
@@ -36,6 +38,7 @@ export type AdverseReason = (typeof ADVERSE_REASONS)[number];
 
 export const STAGE_LABELS: Record<AllStages, string> = {
   hot_lead: "Hot Leads",
+  needs_quote: "Needs Quote",
   app_in: "App In",
   submission: "Submission",
   processing: "Processing",
@@ -46,17 +49,44 @@ export const LOAN_TYPE_LABELS: Record<LoanType, string> = {
   cashout: "Cash Out",
   rate_term: "Rate & Term",
   heloc: "HELOC",
-  heloan: "HE Loan",
+  heloan: "HELOAN",
   hei: "HEI",
   purchase: "Purchase",
   hard_money: "Hard Money",
   fast_50: "Fast 50",
+  reverse: "Reverse",
 };
 
 export const CRM_LABELS: Record<CRM, string> = {
   bonzo: "Bonzo",
   ghl: "GHL",
 };
+
+/**
+ * The stage a lead lands in when none was chosen. The literal lives here and
+ * nowhere else, so the one place that decides the default is greppable.
+ */
+export const DEFAULT_STAGE = "hot_lead" as const satisfies AllStages;
+
+/**
+ * Stages that receive cadence, drafts, and Telegram pushes. Every automation
+ * path must reference this — never a bare stage comparison. Adding a stage
+ * without adding it here silently removes those leads from all automation.
+ *
+ * Phase 6 / D1: 'needs_quote' is deliberately NOT here. A lead parked there is
+ * blocked on a number Eddie owes them, and he chose to work those by hand
+ * rather than have the engine draft around a quote it cannot see. The cost is
+ * that dragging a card into Needs Quote stops its cadence until it is moved
+ * back — which is why the import dialog says so out loud rather than letting
+ * enrollment sit there inert. Flipping that decision is a one-line change here.
+ */
+export const QUEUE_ELIGIBLE_STAGES = ["hot_lead"] as const;
+export type QueueEligibleStage = (typeof QUEUE_ELIGIBLE_STAGES)[number];
+
+/** Membership test for {@link QUEUE_ELIGIBLE_STAGES}. */
+export function isQueueEligible(stage: string | null | undefined): boolean {
+  return QUEUE_ELIGIBLE_STAGES.includes(stage as QueueEligibleStage);
+}
 
 export const ADVERSE_REASON_LABELS: Record<AdverseReason, string> = {
   credit: "Credit",

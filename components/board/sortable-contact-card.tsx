@@ -12,6 +12,7 @@ interface SortableContactCardProps {
   meta?: BoardMeta;
   onClick: () => void;
   onEnroll?: (contactId: string) => void;
+  onMarkAdverse?: (contact: Contact) => void;
 }
 
 export function SortableContactCard({
@@ -20,6 +21,7 @@ export function SortableContactCard({
   meta,
   onClick,
   onEnroll,
+  onMarkAdverse,
 }: SortableContactCardProps) {
   const {
     attributes,
@@ -44,6 +46,7 @@ export function SortableContactCard({
         meta={meta}
         onClick={onClick}
         onEnroll={onEnroll}
+        onMarkAdverse={onMarkAdverse}
       />
     </div>
   );

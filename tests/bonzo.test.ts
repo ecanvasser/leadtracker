@@ -282,6 +282,10 @@ describe("mapBonzoLoanType", () => {
     ["hard_money", "Hard Money", null],
     ["hard_money", "Bridge Loan", null],
     ["fast_50", "Fast 50", null],
+    ["reverse", "Reverse Mortgage", null],
+    ["reverse", "HECM", null],
+    ["reverse", "Home Equity Conversion Mortgage", null],
+    ["reverse", "Reverse", "Purchase"],
   ];
 
   for (const [expected, loan_type, loan_purpose] of cases) {
@@ -289,6 +293,26 @@ describe("mapBonzoLoanType", () => {
       expect(mapBonzoLoanType({ loan_type, loan_purpose })).toBe(expected);
     });
   }
+
+  // A HECM-to-HECM refinance is still a reverse mortgage. The bare-refinance
+  // rule sits at the bottom of the array and would claim this record if the
+  // reverse rule were not above it — the exact ordering bug the array's comment
+  // warns about, and the reason the new rule went in at the top.
+  it("prefers reverse over the bare refinance match", () => {
+    expect(mapBonzoLoanType({ loan_type: "Reverse Mortgage Refinance", loan_purpose: null }))
+      .toBe("reverse");
+    expect(mapBonzoLoanType({ loan_type: "Refinance", loan_purpose: "HECM to HECM" }))
+      .toBe("reverse");
+  });
+
+  // Reverse must not swallow the other home-equity products, whose rules sit
+  // below it now.
+  it("leaves the other equity products alone", () => {
+    expect(mapBonzoLoanType({ loan_type: "Home Equity Line of Credit", loan_purpose: null }))
+      .toBe("heloc");
+    expect(mapBonzoLoanType({ loan_type: "Home Equity Loan", loan_purpose: null }))
+      .toBe("heloan");
+  });
 
   // "cash out refinance" contains "refinance"; the specific reading must win.
   it("prefers cash-out over the bare refinance match", () => {
@@ -311,7 +335,9 @@ describe("mapBonzoLoanType", () => {
   // Returning null rather than guessing is the point: silently defaulting is
   // what produced the original bug.
   it("returns null rather than guessing", () => {
-    expect(mapBonzoLoanType({ loan_type: "Reverse Mortgage", loan_purpose: null })).toBeNull();
+    // Was "Reverse Mortgage" until phase 6 added it as a real product. The
+    // assertion still needs a loan type the mapper genuinely does not know.
+    expect(mapBonzoLoanType({ loan_type: "Construction Loan", loan_purpose: null })).toBeNull();
     expect(mapBonzoLoanType({ loan_type: null, loan_purpose: null })).toBeNull();
     expect(mapBonzoLoanType({ loan_type: "", loan_purpose: "" })).toBeNull();
     expect(mapBonzoLoanType(null)).toBeNull();

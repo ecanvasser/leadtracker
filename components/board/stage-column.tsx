@@ -11,16 +11,20 @@ import { SortableContactCard } from "./sortable-contact-card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 interface StageColumnProps {
-  /** Includes 'adverse', which is a drop target like any other stage. */
+  /**
+   * Typed as AllStages rather than PipelineStage: 'adverse' is still a valid
+   * stage and was rendered as a column until 6.3. The board only mounts
+   * pipeline stages now.
+   */
   stage: AllStages;
   label: string;
   contacts: Contact[];
   taskCounts: Record<string, number>;
   meta: Record<string, BoardMeta>;
-  /** Renders the column de-emphasised — used for Adverse. */
-  muted?: boolean;
   onContactClick: (id: string) => void;
   onEnroll?: (contactId: string) => void;
+  /** Opens the adverse reason picker for a card. */
+  onMarkAdverse?: (contact: Contact) => void;
 }
 
 export function StageColumn({
@@ -29,9 +33,9 @@ export function StageColumn({
   contacts,
   taskCounts,
   meta,
-  muted,
   onContactClick,
   onEnroll,
+  onMarkAdverse,
 }: StageColumnProps) {
   const { setNodeRef, isOver } = useDroppable({ id: stage });
 
@@ -40,9 +44,9 @@ export function StageColumn({
       // overflow-hidden so cards are clipped by the rounded border instead of
       // painting over it, and min-h-0 further down so the list scrolls rather
       // than growing past the column.
-      className={`flex flex-col min-w-[260px] w-[260px] md:flex-1 overflow-hidden rounded-xl border transition-colors ${
-        muted ? "border-border/30 bg-muted/10" : "border-border/50 bg-muted/30"
-      } ${isOver ? "bg-destructive/10 border-destructive/40" : ""}`}
+      className={`flex flex-col min-w-[260px] w-[260px] md:flex-1 overflow-hidden rounded-xl border border-border/50 bg-muted/30 transition-colors ${
+        isOver ? "bg-destructive/10 border-destructive/40" : ""
+      }`}
     >
       <div className="shrink-0 flex items-center justify-between px-3 py-2.5 border-b border-border/50">
         <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -69,6 +73,7 @@ export function StageColumn({
                 meta={meta[contact.id]}
                 onClick={() => onContactClick(contact.id)}
                 onEnroll={onEnroll}
+                onMarkAdverse={onMarkAdverse}
               />
             ))}
           </SortableContext>

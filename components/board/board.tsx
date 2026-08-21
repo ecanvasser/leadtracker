@@ -23,6 +23,7 @@ import {
   STAGE_LABELS,
   ADVERSE_REASONS,
   ADVERSE_REASON_LABELS,
+  isQueueEligible,
   type AdverseReason,
 } from "@/types/db";
 import type { BoardMeta } from "@/app/(app)/board/page";
@@ -153,7 +154,7 @@ export function Board({
     const m = initialMeta[c.id];
     switch (filter) {
       case "excluded":
-        return c.stage === "hot_lead" && !c.insights_enabled;
+        return isQueueEligible(c.stage) && !c.insights_enabled;
       case "in_market":
         return m?.leadTemp === "in_market" || m?.leadTemp === "warming";
       case "blocked":
@@ -287,6 +288,11 @@ export function Board({
     // 4.6 — dropping onto Adverse asks for the reason inline rather than
     // sending you to the detail page for a dropdown and a Save. The move is
     // committed by the picker so a cancel leaves the lead where it was.
+    //
+    // 6.3 — unreachable from the board today: there is no Adverse column to
+    // drop onto. Kept because 'adverse' is still a valid stage and this is the
+    // correct behaviour if the column ever returns; the picker it opens is very
+    // much alive, driven now by the control on the card.
     if (targetStage === "adverse" && contact.stage !== "adverse") {
       setAdverseFor(contact);
       return;
@@ -457,22 +463,16 @@ export function Board({
                 meta={initialMeta}
                 onContactClick={(id) => router.push(`/contacts/${id}`)}
                 onEnroll={handleEnroll}
+                onMarkAdverse={setAdverseFor}
               />
             ))}
 
-            {/* 4.6 — Adverse as a droppable column. Marking a lead dead was
-                the slowest interaction in the app despite being the most
-                common outcome in the funnel. */}
-            <StageColumn
-              stage="adverse"
-              label={STAGE_LABELS.adverse}
-              contacts={contactsByStage("adverse")}
-              taskCounts={taskCounts}
-              meta={initialMeta}
-              muted
-              onContactClick={(id) => router.push(`/contacts/${id}`)}
-              onEnroll={handleEnroll}
-            />
+            {/* 6.3 — the Adverse column is gone. It was a sixth column
+                competing for width with the pipeline, and Needs Quote earns
+                that space more. Marking a lead dead keeps the two-click cost
+                4.6 bought: the control now lives on the card itself
+                (ContactCard → onMarkAdverse) and opens the same reason picker
+                below. Adverse leads are listed on /adverse. */}
             <TodoColumn
               tasks={tasks}
               onCompleteTask={handleCompleteTask}

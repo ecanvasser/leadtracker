@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { sweepRefreshJobs, REFRESH_SWEEP_INTERVAL_MS } from "@/lib/jobs/enqueue";
+import { QUEUE_ELIGIBLE_STAGES } from "@/types/db";
 
 /**
  * Stub covering the four tables a sweep touches.
@@ -19,6 +20,7 @@ function stub(opts: {
 }) {
   const inserts: Record<string, unknown>[] = [];
   const updates: Record<string, unknown>[] = [];
+  const stageFilters: string[][] = [];
 
   const client = {
     from(table: string) {
@@ -50,14 +52,20 @@ function stub(opts: {
         };
       }
       if (table === "contacts") {
+        // .select().eq(user_id).in(stage).eq(insights_enabled).not(prospect_id)
+        // The stage filter is a membership test against QUEUE_ELIGIBLE_STAGES,
+        // so `stages` records what the sweep actually asked for.
         return {
           select: () => ({
             eq: () => ({
-              eq: () => ({
-                eq: () => ({
-                  not: async () => ({ data: opts.contacts ?? [], error: null }),
-                }),
-              }),
+              in: (_col: string, values: readonly string[]) => {
+                stageFilters.push([...values]);
+                return {
+                  eq: () => ({
+                    not: async () => ({ data: opts.contacts ?? [], error: null }),
+                  }),
+                };
+              },
             }),
           }),
         };
@@ -76,7 +84,7 @@ function stub(opts: {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
 
-  return { client, inserts, updates };
+  return { client, inserts, updates, stageFilters };
 }
 
 // 2026-08-20 17:00 UTC = 10:00 Pacific — inside working hours.
@@ -95,6 +103,17 @@ describe("sweepRefreshJobs", () => {
     expect(out.enqueued).toBe(3);
     expect(inserts).toHaveLength(3);
     expect(inserts.every((i) => i.job_type === "refresh_cache")).toBe(true);
+  });
+
+  // D1 regression guard. The sweep must ask the database for exactly the
+  // stages QUEUE_ELIGIBLE_STAGES names — no more (a stage that should not be
+  // worked gets swept) and no fewer (a stage that should be silently stops).
+  it("filters on QUEUE_ELIGIBLE_STAGES, not a hardcoded stage", async () => {
+    const { client, stageFilters } = stub({ contacts: [{ id: "c1" }] });
+    await sweepRefreshJobs(client, "u1", DURING_WORK);
+
+    expect(stageFilters).toHaveLength(1);
+    expect([...stageFilters[0]].sort()).toEqual([...QUEUE_ELIGIBLE_STAGES].sort());
   });
 
   // Gating lives in the worker, not the cron expression: pg_cron runs in the

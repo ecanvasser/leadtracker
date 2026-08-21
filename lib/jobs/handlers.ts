@@ -8,6 +8,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { isQueueEligible } from "@/types/db";
 import {
   getCommunicationHistory,
   getProspectNotes,
@@ -95,8 +96,8 @@ export const refreshCache: JobHandler = async (supabase, job) => {
 
   // Enrollment or stage may have changed since the job was enqueued. Not an
   // error — just nothing to do.
-  if (!contact.insights_enabled || contact.stage !== "hot_lead") {
-    return { summary: "not an enrolled hot lead", usedModel: false };
+  if (!contact.insights_enabled || !isQueueEligible(contact.stage)) {
+    return { summary: "not an enrolled lead in a queue-eligible stage", usedModel: false };
   }
   if (!contact.bonzo_prospect_id) {
     return { summary: "no linked Bonzo prospect", usedModel: false };
@@ -389,8 +390,8 @@ export const draftReply: JobHandler = async (supabase, job) => {
     .maybeSingle();
 
   if (!contact) return { summary: "contact gone", usedModel: false };
-  if (!contact.insights_enabled || contact.stage !== "hot_lead") {
-    return { summary: "not an enrolled hot lead", usedModel: false };
+  if (!contact.insights_enabled || !isQueueEligible(contact.stage)) {
+    return { summary: "not an enrolled lead in a queue-eligible stage", usedModel: false };
   }
 
   const timeZone = await getUserTimezone(contact.user_id, supabase);

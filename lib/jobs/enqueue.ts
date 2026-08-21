@@ -10,6 +10,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { QUEUE_ELIGIBLE_STAGES } from "@/types/db";
 import { enqueueJob } from "@/lib/jobs/queue";
 import {
   getNotificationWindows,
@@ -84,13 +85,14 @@ export async function sweepRefreshJobs(
     return { swept: false, reason: "another tick claimed the sweep", enqueued: 0, skipped: 0 };
   }
 
-  // Hot leads only. The filter is deliberate — insights never extend to
-  // App In / Submission / Processing.
+  // Queue-eligible stages only. The filter is deliberate — insights never
+  // extend to Needs Quote / App In / Submission / Processing. See
+  // QUEUE_ELIGIBLE_STAGES for which stages those are and why.
   const { data: contacts } = await supabase
     .from("contacts")
     .select("id")
     .eq("user_id", userId)
-    .eq("stage", "hot_lead")
+    .in("stage", [...QUEUE_ELIGIBLE_STAGES])
     .eq("insights_enabled", true)
     .not("bonzo_prospect_id", "is", null);
 

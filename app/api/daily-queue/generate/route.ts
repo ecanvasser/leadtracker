@@ -4,7 +4,7 @@ import { createServiceClient } from "@/lib/supabase/service";
 import { planLead, type LeadPlan, type QueueAction, type OutreachLogEntry } from "@/lib/cadence/engine";
 import { resolveCadenceConfig, type CadenceConfig } from "@/lib/cadence/config";
 import type { LeadState } from "@/lib/insights/lead-state";
-import { Contact } from "@/types/db";
+import { Contact, QUEUE_ELIGIBLE_STAGES } from "@/types/db";
 import { getUserTimezone, localDate } from "@/lib/time";
 import { modelFor } from "@/lib/ai/models";
 import type { VoiceProfile } from "@/lib/ai/voice-profile-types";
@@ -146,7 +146,10 @@ export async function POST(request: NextRequest) {
     .select("*")
     .eq("user_id", userId)
     .eq("insights_enabled", true)
-    .eq("stage", "hot_lead");
+    // Membership, not equality. QUEUE_ELIGIBLE_STAGES is the single definition
+    // of "a lead the engine works"; a bare comparison here is how a new stage
+    // silently drops out of the queue.
+    .in("stage", [...QUEUE_ELIGIBLE_STAGES]);
 
   if (!contacts || contacts.length === 0) {
     return NextResponse.json({ queue: [], generated: true });

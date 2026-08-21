@@ -467,6 +467,11 @@ export function mapBonzoLoanType(
   // wording with it: "no cash out" contains "cash out", and "cash out
   // refinance" contains "refinance". The most specific reading wins.
   const rules: [RegExp, LoanTypeSlug][] = [
+    // First, above every refinance rule. A reverse mortgage record legitimately
+    // carries the word "refinance" (a HECM-to-HECM refi is still a HECM), and
+    // the bare-refinance rule at the bottom would otherwise claim it. 'hecm' is
+    // matched because Bonzo records use the acronym more often than the words.
+    [/\breverse\b|\bhecm\b|\bhome equity conversion\b/, "reverse"],
     [/\bhard money\b|\bbridge\b|\bfix and flip\b/, "hard_money"],
     [/\bheloc\b|\bhome equity line\b|\bequity line\b/, "heloc"],
     [/\bhe loan\b|\bheloan\b|\bhome equity loan\b/, "heloan"],
@@ -504,4 +509,5 @@ export type LoanTypeSlug =
   | "hei"
   | "purchase"
   | "hard_money"
-  | "fast_50";
+  | "fast_50"
+  | "reverse";

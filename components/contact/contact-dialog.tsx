@@ -1,8 +1,10 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { mapBonzoLoanType, getMortgageFields } from "@/lib/bonzo/client";
+import { findExistingBonzoContact } from "@/lib/db/contacts";
 import {
   Contact,
   Task,
@@ -18,6 +20,8 @@ import {
   CRM_LABELS,
   STAGE_LABELS,
   ADVERSE_REASON_LABELS,
+  DEFAULT_STAGE,
+  isQueueEligible,
 } from "@/types/db";
 import {
   Dialog,
@@ -38,7 +42,7 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { Card, CardContent } from "@/components/ui/card";
 import { toast } from "sonner";
-import { Trash2, Plus, Search, Loader2, Download } from "lucide-react";
+import { Trash2, Plus, Search, Loader2, Download, AlertTriangle } from "lucide-react";
 
 interface ContactDialogProps {
   contact: Contact | null;
@@ -72,6 +76,7 @@ export function ContactDialog({
 }: ContactDialogProps) {
   const isNew = !contact;
   const supabase = createClient();
+  const router = useRouter();
 
   const [mode, setMode] = useState<NewLeadMode>("manual");
   const [bonzoEmail, setBonzoEmail] = useState("");
@@ -82,11 +87,16 @@ export function ContactDialog({
   const [bonzoFull, setBonzoFull] = useState<Record<string, unknown> | null>(null);
   const [bonzoError, setBonzoError] = useState<string | null>(null);
   const [bonzoImporting, setBonzoImporting] = useState(false);
+  // 5.1 — whether the loan type below came from the Bonzo record or is just the
+  // fallback. A wrong guess and a confident match used to look identical.
+  const [loanTypeSource, setLoanTypeSource] = useState<"bonzo" | "fallback" | null>(null);
+  // 5.2 — a prospect already on the board, in any stage.
+  const [duplicate, setDuplicate] = useState<Pick<Contact, "id" | "name" | "stage"> | null>(null);
 
   const [name, setName] = useState(contact?.name ?? "");
   const [loanType, setLoanType] = useState<LoanType>(contact?.loan_type ?? "purchase");
   const [crm, setCrm] = useState<CRM>(contact?.crm ?? "bonzo");
-  const [stage, setStage] = useState<AllStages>(contact?.stage ?? "hot_lead");
+  const [stage, setStage] = useState<AllStages>(contact?.stage ?? DEFAULT_STAGE);
   const [adverseReason, setAdverseReason] = useState<AdverseReason | "">(contact?.adverse_reason ?? "");
   const [notes, setNotes] = useState(contact?.notes ?? "");
   const [saving, setSaving] = useState(false);
@@ -114,11 +124,20 @@ export function ContactDialog({
       setMode("manual");
       setBonzoEmail("");
       setBonzoResult(null);
-    setBonzoFull(null);
       setBonzoFull(null);
       setBonzoError(null);
+      setLoanTypeSource(null);
+      setDuplicate(null);
+      // Stage and loan type are shared with the edit path, so only the
+      // new-lead dialog may reset them — otherwise reopening the same contact
+      // would show defaults instead of that contact's own values (the effect
+      // below is keyed on contact.id and would not re-run to correct it).
+      if (!contact) {
+        setStage(DEFAULT_STAGE);
+        setLoanType("purchase");
+      }
     }
-  }, [open]);
+  }, [open, contact]);
 
   async function loadTasks() {
     if (!contact) return;
@@ -139,6 +158,8 @@ export function ContactDialog({
     setBonzoResult(null);
     setBonzoFull(null);
     setBonzoError(null);
+    setLoanTypeSource(null);
+    setDuplicate(null);
 
     try {
       const res = await fetch("/api/insights/search-bonzo", {
@@ -155,6 +176,21 @@ export function ContactDialog({
       } else {
         setBonzoResult(data.prospect);
         setBonzoFull(data.fullProspect ?? null);
+
+        // Seed the selectors from the record so the import button acts on what
+        // is actually shown, not on values computed at click time.
+        const mapped = mapBonzoLoanType(getMortgageFields(data.fullProspect ?? null));
+        setLoanType(mapped ?? "purchase");
+        setLoanTypeSource(mapped ? "bonzo" : "fallback");
+
+        // 5.2 — checked here rather than at import so the answer is on screen
+        // before the button is pressed.
+        setDuplicate(
+          await findExistingBonzoContact(supabase, {
+            prospectId: data.prospect?.id,
+            email: data.prospect?.email ?? bonzoEmail.trim(),
+          })
+        );
       }
     } catch {
       setBonzoError("Search failed. Try again.");
@@ -162,19 +198,47 @@ export function ContactDialog({
     setBonzoSearching(false);
   }
 
+  function openDuplicate() {
+    if (!duplicate) return;
+    onOpenChange(false);
+    router.push(`/contacts/${duplicate.id}`);
+  }
+
   async function handleBonzoImport() {
     if (!bonzoResult) return;
+
+    // 5.2 — never create a second row for a prospect already on the board. The
+    // check ran at search time; re-read here because the state could have moved
+    // on (another tab, a slow search) between then and this click.
+    if (duplicate) {
+      toast.error(`${duplicate.name} is already on the board`, {
+        description: `They are in ${STAGE_LABELS[duplicate.stage]}. Open that contact instead.`,
+      });
+      return;
+    }
+
+    // An adverse lead without a reason is a hole in the funnel record — the
+    // manual path already refuses it, and importing straight to Adverse must
+    // not be the way around that.
+    if (stage === "adverse" && !adverseReason) {
+      toast.error("Select an adverse reason");
+      return;
+    }
+
     setBonzoImporting(true);
 
     const importName = bonzoResult.name || bonzoEmail.trim();
 
+    // Position is computed inside the stage being imported into. Against
+    // hot_lead it produced a position from the wrong column, so the card landed
+    // in an arbitrary spot in its actual one.
     const { data: maxPos } = await supabase
       .from("contacts")
       .select("position")
-      .eq("stage", "hot_lead")
+      .eq("stage", stage)
       .order("position", { ascending: false })
       .limit(1)
-      .single();
+      .maybeSingle();
 
     const position = maxPos ? maxPos.position + 1000 : 1000;
 
@@ -183,16 +247,20 @@ export function ContactDialog({
       .insert({
         user_id: userId,
         name: importName,
-        // Mapped from the Bonzo record rather than hardcoded. Importing every
-        // lead as a purchase meant a cash-out refinance was labelled wrong and
-        // every draft written for it reasoned from the wrong product.
-        loan_type: (mapBonzoLoanType(getMortgageFields(bonzoFull)) ??
-          "purchase") as LoanType,
+        // Seeded from the Bonzo record at search time and overridable above.
+        // Importing every lead as a purchase meant a cash-out refinance was
+        // labelled wrong and every draft written for it reasoned from the
+        // wrong product.
+        loan_type: loanType,
         crm: "bonzo" as CRM,
-        stage: "hot_lead" as AllStages,
+        stage,
+        adverse_reason: stage === "adverse" ? adverseReason || null : null,
         position,
         bonzo_prospect_id: bonzoResult.id,
         bonzo_email: bonzoResult.email,
+        // 5.4 — enrolled regardless of stage, so the lead is ready the moment
+        // it is moved into an active one. Inert enrollment is only a problem
+        // when it is silent, so the selector says so out loud.
         insights_enabled: true,
         // Reminders need a number; without this it was fetched and discarded.
         phone: bonzoResult.phone ?? null,
@@ -232,7 +300,11 @@ export function ContactDialog({
           description: "Open the contact and hit Refresh to pull it.",
         });
       } else {
-        toast.success(`${importName} imported with history`);
+        toast.success(`${importName} imported with history`, {
+          description: isQueueEligible(stage)
+            ? undefined
+            : `Parked in ${STAGE_LABELS[stage]} — not worked until it moves to Hot Leads.`,
+        });
       }
     } catch {
       toast.warning(`${importName} imported, but history did not load`);
@@ -449,35 +521,153 @@ export function ContactDialog({
                       </p>
                     )}
                   </div>
-                  <div className="flex gap-2">
-                    <Button
-                      size="sm"
-                      onClick={handleBonzoImport}
-                      disabled={bonzoImporting}
-                      className="flex-1"
-                    >
-                      {bonzoImporting ? (
-                        <>
-                          <Loader2 className="h-3 w-3 animate-spin mr-1.5" />
-                          Importing...
-                        </>
-                      ) : (
-                        "Import as hot lead"
+
+                  {/* 5.2 — already on the board. Importing again would create a
+                      second row for the same prospect, which is never what is
+                      wanted, so the import is refused rather than warned about. */}
+                  {duplicate ? (
+                    <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5 space-y-2">
+                      <p className="text-xs text-amber-700 dark:text-amber-400 flex items-start gap-1.5">
+                        <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-px" />
+                        <span>
+                          <b>{duplicate.name}</b> is already on the board, in{" "}
+                          <b>{STAGE_LABELS[duplicate.stage]}</b>.
+                        </span>
+                      </p>
+                      <div className="flex gap-2">
+                        <Button size="sm" className="flex-1" onClick={openDuplicate}>
+                          Open that contact
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            setBonzoResult(null);
+                            setBonzoFull(null);
+                            setBonzoEmail("");
+                            setDuplicate(null);
+                            setLoanTypeSource(null);
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      {/* 5.1 — stage and loan type are chosen before importing.
+                          They write to the same state the manual path uses. */}
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1.5">
+                          <Label className="text-xs">Stage</Label>
+                          <Select value={stage} onValueChange={(v) => setStage(v as AllStages)}>
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {ALL_STAGES.map((st) => (
+                                <SelectItem key={st} value={st}>
+                                  {STAGE_LABELS[st]}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <Label className="text-xs">Loan Type</Label>
+                          <Select value={loanType} onValueChange={(v) => {
+                            setLoanType(v as LoanType);
+                            setLoanTypeSource(null);
+                          }}>
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {LOAN_TYPES.map((lt) => (
+                                <SelectItem key={lt} value={lt}>
+                                  {LOAN_TYPE_LABELS[lt]}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          {loanTypeSource === "bonzo" && (
+                            <p className="text-[10px] text-muted-foreground">
+                              From Bonzo: {LOAN_TYPE_LABELS[loanType]}
+                            </p>
+                          )}
+                          {loanTypeSource === "fallback" && (
+                            <p className="text-[10px] text-amber-600 dark:text-amber-400">
+                              Bonzo had no loan type — defaulted to Purchase.
+                            </p>
+                          )}
+                        </div>
+                      </div>
+
+                      {stage === "adverse" && (
+                        <div className="space-y-1.5">
+                          <Label className="text-xs">Adverse Reason</Label>
+                          <Select
+                            value={adverseReason}
+                            onValueChange={(v) => setAdverseReason(v as AdverseReason)}
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="Select reason..." />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {ADVERSE_REASONS.map((r) => (
+                                <SelectItem key={r} value={r}>
+                                  {ADVERSE_REASON_LABELS[r]}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
                       )}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        setBonzoResult(null);
-    setBonzoFull(null);
-      setBonzoFull(null);
-                        setBonzoEmail("");
-                      }}
-                    >
-                      Cancel
-                    </Button>
-                  </div>
+
+                      {/* 5.4 — enrollment happens either way, so say plainly
+                          when it will sit inert. Silent inertness is the bug
+                          this whole phase is guarding against. */}
+                      {!isQueueEligible(stage) && (
+                        <p className="text-[11px] text-muted-foreground">
+                          Insights will be enabled, but a lead in{" "}
+                          {STAGE_LABELS[stage]} is not worked by the queue — no
+                          cadence, drafts, or Telegram pushes until you move it
+                          to Hot Leads.
+                        </p>
+                      )}
+
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          onClick={handleBonzoImport}
+                          disabled={bonzoImporting}
+                          className="flex-1"
+                        >
+                          {bonzoImporting ? (
+                            <>
+                              <Loader2 className="h-3 w-3 animate-spin mr-1.5" />
+                              Importing...
+                            </>
+                          ) : (
+                            `Import to ${STAGE_LABELS[stage]}`
+                          )}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            setBonzoResult(null);
+                            setBonzoFull(null);
+                            setBonzoEmail("");
+                            setLoanTypeSource(null);
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    </>
+                  )}
                 </CardContent>
               </Card>
             )}
