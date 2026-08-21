@@ -4,6 +4,7 @@ import {
   isOptedOut,
   isInbound,
   isOutbound,
+  mapBonzoLoanType,
   sendSms,
   sendEmail,
   BonzoSendRejectedError,
@@ -254,5 +255,66 @@ describe("isInbound / isOutbound", () => {
     expect(isInbound(null)).toBe(false);
     expect(isOutbound(undefined)).toBe(false);
     expect(isInbound("")).toBe(false);
+  });
+});
+
+/**
+ * Bonzo import hardcoded loan_type: "purchase" for every lead, so a cash-out
+ * refinance arrived labelled a purchase and every draft written for it
+ * reasoned from the wrong product.
+ */
+describe("mapBonzoLoanType", () => {
+  const cases: [string, string | null, string | null][] = [
+    // [expected, loan_type, loan_purpose]
+    ["purchase", "Purchase", null],
+    ["purchase", "purchase", "Home Purchase"],
+    ["cashout", "Refinance", "Cash Out"],
+    ["cashout", "Cash-Out Refinance", null],
+    ["cashout", "cashout", null],
+    ["rate_term", "Refinance", "Rate and Term"],
+    ["rate_term", "Rate & Term Refinance", null],
+    ["rate_term", "Refinance", null],
+    ["heloc", "HELOC", null],
+    ["heloc", "Home Equity Line of Credit", null],
+    ["heloan", "Home Equity Loan", null],
+    ["hei", "HEI", null],
+    ["hei", "Shared Equity Investment", null],
+    ["hard_money", "Hard Money", null],
+    ["hard_money", "Bridge Loan", null],
+    ["fast_50", "Fast 50", null],
+  ];
+
+  for (const [expected, loan_type, loan_purpose] of cases) {
+    it(`maps ${JSON.stringify(loan_type)} / ${JSON.stringify(loan_purpose)} to ${expected}`, () => {
+      expect(mapBonzoLoanType({ loan_type, loan_purpose })).toBe(expected);
+    });
+  }
+
+  // "cash out refinance" contains "refinance"; the specific reading must win.
+  it("prefers cash-out over the bare refinance match", () => {
+    expect(mapBonzoLoanType({ loan_type: "Cash Out Refinance", loan_purpose: null }))
+      .toBe("cashout");
+  });
+
+  it("reads the distinction from loan_purpose when loan_type is generic", () => {
+    expect(mapBonzoLoanType({ loan_type: "Refinance", loan_purpose: "Cash-Out" }))
+      .toBe("cashout");
+    expect(mapBonzoLoanType({ loan_type: "Refinance", loan_purpose: "No Cash Out" }))
+      .toBe("rate_term");
+  });
+
+  it("is tolerant of punctuation and casing", () => {
+    expect(mapBonzoLoanType({ loan_type: "  CASH-OUT  ", loan_purpose: null })).toBe("cashout");
+    expect(mapBonzoLoanType({ loan_type: "H.E.L.O.C.", loan_purpose: null })).toBe("heloc");
+  });
+
+  // Returning null rather than guessing is the point: silently defaulting is
+  // what produced the original bug.
+  it("returns null rather than guessing", () => {
+    expect(mapBonzoLoanType({ loan_type: "Reverse Mortgage", loan_purpose: null })).toBeNull();
+    expect(mapBonzoLoanType({ loan_type: null, loan_purpose: null })).toBeNull();
+    expect(mapBonzoLoanType({ loan_type: "", loan_purpose: "" })).toBeNull();
+    expect(mapBonzoLoanType(null)).toBeNull();
+    expect(mapBonzoLoanType(undefined)).toBeNull();
   });
 });

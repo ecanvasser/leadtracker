@@ -426,3 +426,82 @@ export async function sendEmail(
 
   return toSendResult(await res.json());
 }
+
+// ---------------------------------------------------------------------------
+// Loan type mapping
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps Bonzo's loan fields onto our LoanType enum.
+ *
+ * Bonzo import previously hardcoded "purchase" for every lead, so a cash-out
+ * refinance arrived labelled as a purchase and every draft written for it
+ * reasoned from the wrong product.
+ *
+ * Bonzo sends free text here, and the same product is written several ways
+ * across records, so matching is on normalised substrings rather than exact
+ * values. `loan_purpose` is consulted as well because a record often carries
+ * "Refinance" in loan_type and the distinction between rate-and-term and
+ * cash-out only in loan_purpose.
+ *
+ * Returns null rather than guessing when nothing matches, so the caller can
+ * decide — silently defaulting is what caused the original problem.
+ */
+export function mapBonzoLoanType(
+  fields: Pick<BonzoMortgageFields, "loan_type" | "loan_purpose"> | null | undefined
+): LoanTypeSlug | null {
+  if (!fields) return null;
+
+  const raw = [fields.loan_type, fields.loan_purpose].filter(Boolean).join(" ").toLowerCase();
+  if (!raw.trim()) return null;
+
+  // Two normalisations, because Bonzo writes the same product both ways.
+  // "Cash-Out Refinance" needs punctuation turned into word breaks; "H.E.L.O.C."
+  // needs it removed entirely, since breaking it gives "h e l o c".
+  const spaced = raw.replace(/[^a-z0-9]+/g, " ").trim();
+  const compact = raw.replace(/[^a-z0-9]+/g, "");
+
+  if (!spaced) return null;
+
+  // Order matters. Every rule here is a substring of a later one or shares
+  // wording with it: "no cash out" contains "cash out", and "cash out
+  // refinance" contains "refinance". The most specific reading wins.
+  const rules: [RegExp, LoanTypeSlug][] = [
+    [/\bhard money\b|\bbridge\b|\bfix and flip\b/, "hard_money"],
+    [/\bheloc\b|\bhome equity line\b|\bequity line\b/, "heloc"],
+    [/\bhe loan\b|\bheloan\b|\bhome equity loan\b/, "heloan"],
+    [/\bhei\b|\bequity investment\b|\bshared equity\b/, "hei"],
+    [/\bfast 50\b|\bfast50\b/, "fast_50"],
+    // Before the cash-out rule: "no cash out" is rate-and-term, and it
+    // contains the words the next rule looks for.
+    [/\bno cash out\b|\bwithout cash out\b/, "rate_term"],
+    [/\bcash out\b|\bcashout\b/, "cashout"],
+    [/\brate and term\b|\brate term\b/, "rate_term"],
+    // A bare refinance with no cash-out signal is rate-and-term.
+    [/\brefi\b|\brefinance\b/, "rate_term"],
+    [/\bpurchase\b|\bbuy\b/, "purchase"],
+  ];
+
+  for (const [pattern, slug] of rules) {
+    if (pattern.test(spaced)) return slug;
+  }
+
+  // Nothing matched the spaced form — retry against the compact one to catch
+  // acronyms written with separators.
+  for (const [pattern, slug] of rules) {
+    if (pattern.test(compact)) return slug;
+  }
+
+  return null;
+}
+
+/** Kept local so the Bonzo client does not import from types/db. */
+export type LoanTypeSlug =
+  | "cashout"
+  | "rate_term"
+  | "heloc"
+  | "heloan"
+  | "hei"
+  | "purchase"
+  | "hard_money"
+  | "fast_50";

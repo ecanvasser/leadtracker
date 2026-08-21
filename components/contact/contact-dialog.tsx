@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { mapBonzoLoanType, getMortgageFields } from "@/lib/bonzo/client";
 import {
   Contact,
   Task,
@@ -76,6 +77,9 @@ export function ContactDialog({
   const [bonzoEmail, setBonzoEmail] = useState("");
   const [bonzoSearching, setBonzoSearching] = useState(false);
   const [bonzoResult, setBonzoResult] = useState<BonzoSearchResult | null>(null);
+  // The complete Bonzo record. Needed to map the loan type and to seed
+  // insights_cache; the display stub above carries neither.
+  const [bonzoFull, setBonzoFull] = useState<Record<string, unknown> | null>(null);
   const [bonzoError, setBonzoError] = useState<string | null>(null);
   const [bonzoImporting, setBonzoImporting] = useState(false);
 
@@ -110,6 +114,8 @@ export function ContactDialog({
       setMode("manual");
       setBonzoEmail("");
       setBonzoResult(null);
+    setBonzoFull(null);
+      setBonzoFull(null);
       setBonzoError(null);
     }
   }, [open]);
@@ -131,6 +137,7 @@ export function ContactDialog({
     if (!bonzoEmail.trim()) return;
     setBonzoSearching(true);
     setBonzoResult(null);
+    setBonzoFull(null);
     setBonzoError(null);
 
     try {
@@ -147,6 +154,7 @@ export function ContactDialog({
         setBonzoError("No prospect found with that email in Bonzo.");
       } else {
         setBonzoResult(data.prospect);
+        setBonzoFull(data.fullProspect ?? null);
       }
     } catch {
       setBonzoError("Search failed. Try again.");
@@ -175,7 +183,11 @@ export function ContactDialog({
       .insert({
         user_id: userId,
         name: importName,
-        loan_type: "purchase" as LoanType,
+        // Mapped from the Bonzo record rather than hardcoded. Importing every
+        // lead as a purchase meant a cash-out refinance was labelled wrong and
+        // every draft written for it reasoned from the wrong product.
+        loan_type: (mapBonzoLoanType(getMortgageFields(bonzoFull)) ??
+          "purchase") as LoanType,
         crm: "bonzo" as CRM,
         stage: "hot_lead" as AllStages,
         position,
@@ -190,9 +202,40 @@ export function ContactDialog({
 
     if (error) {
       toast.error("Failed to import contact");
-    } else {
-      toast.success(`${importName} imported from Bonzo`);
-      onCreated?.(data as Contact);
+      setBonzoImporting(false);
+      return;
+    }
+
+    const created = data as Contact;
+    onCreated?.(created);
+
+    // Seed insights_cache. Import sets insights_enabled, so without this the
+    // lead entered the queue with no history at all — meaning unanswered-reply
+    // detection, the highest-priority signal in the engine, could not fire for
+    // it until someone opened the contact and hit Refresh by hand.
+    try {
+      const res = await fetch("/api/insights/enable", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contactId: created.id,
+          bonzoProspectId: bonzoResult.id,
+          bonzoEmail: bonzoResult.email,
+          bonzoProspectData: bonzoFull ?? bonzoResult,
+        }),
+      });
+      const seeded = await res.json();
+
+      if (seeded.error) {
+        // The contact exists and is usable; only its history is missing.
+        toast.warning(`${importName} imported, but history did not load`, {
+          description: "Open the contact and hit Refresh to pull it.",
+        });
+      } else {
+        toast.success(`${importName} imported with history`);
+      }
+    } catch {
+      toast.warning(`${importName} imported, but history did not load`);
     }
 
     setBonzoImporting(false);
@@ -427,6 +470,8 @@ export function ContactDialog({
                       variant="outline"
                       onClick={() => {
                         setBonzoResult(null);
+    setBonzoFull(null);
+      setBonzoFull(null);
                         setBonzoEmail("");
                       }}
                     >
