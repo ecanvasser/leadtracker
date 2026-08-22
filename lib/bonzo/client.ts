@@ -532,3 +532,39 @@ export type LoanTypeSlug =
   | "hard_money"
   | "fast_50"
   | "reverse";
+
+/** One campaign, as the workflow builder's dropdown needs it. */
+export interface BonzoCampaign {
+  id: number;
+  name: string;
+  prospects_count?: string;
+  sequence?: { id: number; name: string; enabled?: boolean } | null;
+}
+
+/**
+ * Every campaign, following pagination.
+ *
+ * /v3/campaigns returns 25 per page and this account has 35, so an unpaginated
+ * read silently reports a truncated list — which in the builder's dropdown
+ * means a campaign Eddie needs is simply absent, with no error to explain it.
+ *
+ * Requires the `campaigns` token scope. The original LeadTracker token did not
+ * carry it and this 403s without it, so the caller surfaces that specifically
+ * rather than showing an empty dropdown.
+ */
+export async function listCampaigns(): Promise<BonzoCampaign[]> {
+  const all: BonzoCampaign[] = [];
+
+  // Bounded rather than while(true): a malformed meta block must not spin.
+  for (let page = 1; page <= 50; page++) {
+    const res = await bonzoFetch(`/v3/campaigns?page=${page}`);
+    const json = await res.json();
+    const rows: BonzoCampaign[] = json.data ?? [];
+    all.push(...rows);
+
+    const last = json.meta?.last_page;
+    if (!rows.length || !last || page >= last) break;
+  }
+
+  return all;
+}
