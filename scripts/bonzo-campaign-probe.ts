@@ -270,9 +270,29 @@ async function writePhase(campaigns: Campaign[]) {
     body: {
       first_name: "ZZ-ProbeDoNotContact",
       last_name: String(stamp),
-      // No phone and no email: there is no address for a sequence to send to,
-      // which is the strongest guarantee available here.
-      type: "prospect",
+      /*
+       * Bonzo rejects a prospect with no contact details at all ("No contact
+       * details passed"), so the ideal — a record with nothing to send to —
+       * is not available. This is the next best thing:
+       *
+       *   - Email at example.com, which is reserved by IANA (RFC 2606)
+       *     precisely for this and accepts no mail. It is syntactically valid,
+       *     so it passes Bonzo's validation, and it can never reach a person.
+       *   - No phone at all. SMS is the channel that costs money and reaches
+       *     someone instantly, and it stays impossible rather than merely
+       *     unlikely.
+       *
+       * The remaining defences are unchanged: DNC is set and read back as true
+       * before any campaign call, and both campaigns are required to have a
+       * disabled sequence.
+       */
+      email: `zz-probe-${stamp}@example.com`,
+      /*
+       * `type` is omitted deliberately. The document types it as a string enum
+       * of "0" | "1" without saying what either means, and only first_name is
+       * required — so let Bonzo apply its own default rather than guess.
+       * Passing "prospect" returned 422.
+       */
     },
   });
 
