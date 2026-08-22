@@ -17,6 +17,7 @@ import type { LeadState } from "@/lib/insights/lead-state";
 /** Telegram caps callback_data at 64 bytes, so action codes are short. */
 export const CB = {
   send: "qs",
+  edit: "qe",
   skip: "qk",
   snoozeMenu: "qz",
   snoozeApply: "qza",
@@ -176,11 +177,12 @@ export function approvalKeyboard(input: {
     kb.text("✅ Done", `${CB.send}:${id}`).text("⏰ Snooze", `${CB.snoozeMenu}:${id}`);
     kb.row().text("⏭ Skip", `${CB.skip}:${id}`);
   } else {
-    // Phase 7 retirement: Edit and Redraft are gone with the drafting
-    // subsystem. Section 5 replaces Send outright with Hand off / Mark
-    // adverse; until then a message card offers only Send, Snooze and Skip.
-    kb.text("✅ Send", `${CB.send}:${id}`).text("⏰ Snooze", `${CB.snoozeMenu}:${id}`);
-    kb.row().text("⏭ Skip", `${CB.skip}:${id}`);
+    // Phase 7 retirement removed Redraft with the drafting subsystem. Edit
+    // stays: it pastes Eddie's own text verbatim, generates nothing, and with
+    // draft_message now always null it is the only way a message goes out
+    // from Telegram at all. Section 5 replaces these buttons.
+    kb.text("✅ Send", `${CB.send}:${id}`).text("✏️ Edit", `${CB.edit}:${id}`);
+    kb.row().text("⏰ Snooze", `${CB.snoozeMenu}:${id}`).text("⏭ Skip", `${CB.skip}:${id}`);
   }
 
   if (input.bonzoProspectId) {

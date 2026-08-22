@@ -160,6 +160,13 @@ export function validateCadenceConfig(value: unknown): string | null {
   }
 
   const cfg = value as Record<string, unknown>;
+
+  // Phase 7 retirement: saturday_calls, saturday_max_messages,
+  // unresponsive_max_consecutive and in_market_max_age_days no longer drive
+  // anything — the lanes that read them are gone, and their controls are off
+  // the Settings page. They stay validated here so an older stored config
+  // still round-trips through a save instead of being rejected. Do not wire
+  // new UI to them.
   const booleans = ["work_sunday", "work_saturday", "saturday_calls"];
   const numbers = [
     "saturday_max_messages",

@@ -15,6 +15,7 @@
 import type { Context } from "grammy";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createServiceClient } from "@/lib/supabase/service";
+import type { SessionData } from "@/lib/telegram/session";
 import { getUserIdByTelegramId } from "@/lib/db/telegram";
 import { sendQueueItem, SendRefusedError } from "@/lib/outreach/send";
 import {
@@ -112,7 +113,10 @@ function atLocalHour(date: string, hour: number, timeZone: string): Date {
  * Returns true when it consumed the callback, so the generic command handler
  * can ignore it.
  */
-export async function handleApprovalCallback(ctx: Context): Promise<boolean> {
+export async function handleApprovalCallback(
+  ctx: Context,
+  session: SessionData
+): Promise<boolean> {
   const data = ctx.callbackQuery?.data;
   if (!data || !ctx.from) return false;
 
@@ -200,6 +204,15 @@ export async function handleApprovalCallback(ctx: Context): Promise<boolean> {
       await applySend(ctx, supabase, userId, queueItemId);
       return true;
 
+    case CB.edit:
+      await ctx.answerCallbackQuery();
+      session.action = "queue_edit";
+      session.queueItemId = queueItemId;
+      await ctx.reply(
+        "Send me the message text. Your next message becomes the body verbatim, then it sends."
+      );
+      return true;
+
     default:
       return false;
   }
@@ -209,7 +222,8 @@ async function applySend(
   ctx: Context,
   supabase: SupabaseClient,
   userId: string,
-  queueItemId: string
+  queueItemId: string,
+  overrideBody?: string
 ): Promise<void> {
   // Claim before sending. A second tap loses the race and is answered without
   // anything reaching Bonzo.
@@ -222,7 +236,9 @@ async function applySend(
   await ctx.answerCallbackQuery({ text: "Sending…" });
 
   try {
-    const outcome = await sendQueueItem(supabase, userId, queueItemId, {});
+    const outcome = await sendQueueItem(supabase, userId, queueItemId, {
+      ...(overrideBody !== undefined ? { overrideBody } : {}),
+    });
 
     await finishCard(ctx, supabase, userId, queueItemId, `✅ ${outcome.receipt}`);
   } catch (e) {
@@ -347,3 +363,42 @@ async function pushNextIfQuiet(
   }
 }
 
+/**
+ * Handles the text reply that follows Edit.
+ *
+ * Phase 7 retirement removed the Redraft branch this used to share. What is
+ * left is the verbatim path: whatever Eddie types becomes the body and sends.
+ * With drafting gone this is the only way a message leaves Telegram, so it is
+ * load-bearing rather than a convenience.
+ *
+ * Returns true when it consumed the message.
+ */
+export async function handleApprovalText(
+  ctx: Context,
+  session: SessionData,
+  clear: () => void
+): Promise<boolean> {
+  const text = ctx.message?.text?.trim();
+  if (!text || !ctx.from) return false;
+
+  if (session.action !== "queue_edit") return false;
+
+  const queueItemId = session.queueItemId;
+  if (!queueItemId) {
+    clear();
+    return false;
+  }
+
+  const supabase = createServiceClient();
+  const userId = await getUserIdByTelegramId(supabase, ctx.from.id);
+  if (!userId) {
+    clear();
+    return true;
+  }
+
+  clear();
+  // Verbatim. Not re-drafted, not re-validated, not "improved" — he wrote it,
+  // it sends as written.
+  await applySend(ctx, supabase, userId, queueItemId, text);
+  return true;
+}

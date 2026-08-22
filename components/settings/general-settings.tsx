@@ -233,39 +233,26 @@ export function GeneralSettings({ initial, models, todaySpend }: Props) {
             </Label>
           </div>
 
-          {settings.cadence_config.work_saturday && (
-            <div className="flex items-center gap-2 pl-6">
-              <Checkbox
-                id="sat-calls"
-                checked={settings.cadence_config.saturday_calls}
-                onCheckedChange={(c) => setCadence("saturday_calls", c === true)}
-              />
-              <Label htmlFor="sat-calls" className="font-normal text-sm">
-                Include calls on Saturdays
-              </Label>
-            </div>
-          )}
+          {/*
+            Phase 7 retirement: the "Include calls on Saturdays" checkbox, the
+            in-market window and the Adverse-after-N-unanswered field are gone
+            from this page because the lanes that read them are gone. The keys
+            stay in cadence_config and in stored jsonb — nothing was migrated —
+            they simply no longer have anything to drive, and a control that
+            silently does nothing is worse than no control.
 
-          <NumberField
-            id="in-market-age"
-            label="A lead counts as in-market for its first"
-            suffix="days"
-            value={settings.cadence_config.in_market_max_age_days}
-            onChange={(v) => setCadence("in_market_max_age_days", v)}
-          />
+            saturday_max_messages was never rendered here (only in the
+            orphaned cadence-settings.tsx), so it needed no change.
+
+            The two toggles above still work: they gate whether the engine runs
+            at all on a weekend day.
+          */}
           <NumberField
             id="blocked-gap"
             label="Minimum gap between touches on a blocked lead"
             suffix="days"
             value={settings.cadence_config.blocked_min_days_between_touches}
             onChange={(v) => setCadence("blocked_min_days_between_touches", v)}
-          />
-          <NumberField
-            id="unresponsive-max"
-            label="Suggest Adverse after"
-            suffix="unanswered touches"
-            value={settings.cadence_config.unresponsive_max_consecutive}
-            onChange={(v) => setCadence("unresponsive_max_consecutive", v)}
           />
         </CardContent>
       </Card>

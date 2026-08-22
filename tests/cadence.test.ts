@@ -290,6 +290,34 @@ describe("an unanswered inbound outranks everything else", () => {
     expect(plan.inputs.rule).toBe("unanswered_inbound");
     expect(plan.actions[0].priorityScore).toBe(1000);
   });
+
+  // Restores engine-level cover for the UTC-vs-local date bug after the
+  // in-market lane's version of this test was retired. tests/time.test.ts
+  // guards the localDate() primitive; this guards the one place in the engine
+  // still wired to it — todaysLog(), which picks the reply channel.
+  //
+  // The regression: at 17:30 Pacific the UTC date has already rolled to
+  // tomorrow, so a UTC engine sees an empty "today" log, does not know an SMS
+  // already went out this morning, and answers the reply by SMS again.
+  it("reads today's outreach in local time when picking the reply channel", () => {
+    // Thursday 17:30 PDT — Friday 00:30 in UTC.
+    const thursdayEvening = new Date("2026-08-21T00:30:00Z");
+    const comms: BonzoCommEntry[] = [
+      { id: 1, content: "sorry, missed this", direction: "inbound", type: "sms", created_at: "2026-08-20T15:00:00Z" },
+    ];
+    // Sent 09:30 PDT the same local day.
+    const sentThisMorning = [logEntry({ created_at: "2026-08-20T16:30:00Z" })];
+
+    const plan = planLead(contact(), sentThisMorning, comms, {
+      timeZone: LA,
+      now: thursdayEvening,
+    });
+
+    expect(plan.inputs.rule).toBe("unanswered_inbound");
+    // Saw this morning's SMS, so it alternates. A UTC engine returns "sms".
+    expect(plan.actions[0].actionType).toBe("email");
+    expect(plan.inputs.local_date).toBe("2026-08-20");
+  });
 });
 
 describe("resolveCadenceConfig", () => {
