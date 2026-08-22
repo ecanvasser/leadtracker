@@ -11,16 +11,14 @@ import { parseCallback, isApprovalCallback, snoozeUntil } from "@/lib/telegram/a
 import type { LeadState } from "@/lib/insights/lead-state";
 
 const leadState: LeadState = {
-  lead_temp: "blocked",
-  blocker: "credit",
-  blocker_evidence: "got denied because of my credit score",
-  blocker_confidence: "high",
-  unblock_path: "Wait for the collection to age off.",
-  unblock_trigger: "Collection drops off",
+  pitch_response: "price_objection",
+  evidence: "That rate is higher than I was expecting",
+  evidence_confidence: "high",
+  suggested_angle: "He balked at the rate, not the payment — lead with the buydown.",
   last_inbound_at: "2026-07-11T15:00:00Z",
   last_outbound_at: "2026-07-10T17:00:00Z",
+  days_since_pitch: 4,
   recommended_action: "hold",
-  why_now: "Collection was due to drop this fall; it has.",
   suppress_until: null,
 };
 
@@ -54,22 +52,39 @@ describe("renderApprovalCard", () => {
     expect(text).toContain("day 42");
   });
 
-  it("shows the temperature and blocker badges", () => {
+  it("shows the pitch-response badge and days since the pitch", () => {
     const text = renderApprovalCard(card());
-    expect(text).toContain("Blocked");
-    expect(text).toContain("blocker: credit");
+    expect(text).toContain("Price");
+    // Section 5: days since pitch is on the card.
+    expect(text).toContain("4 days since pitch");
   });
 
-  it("marks a low-confidence blocker as such", () => {
+  it("omits days since pitch when the pitch date is unknown", () => {
+    // Null must not render as "0 days since pitch", which would read as
+    // "just pitched" about a lead that may be weeks cold.
     const text = renderApprovalCard(
-      card({ leadState: { ...leadState, blocker_confidence: "low" } })
+      card({ leadState: { ...leadState, days_since_pitch: null } })
+    );
+    expect(text).not.toContain("since pitch");
+  });
+
+  it("marks low-confidence evidence as such", () => {
+    const text = renderApprovalCard(
+      card({ leadState: { ...leadState, evidence_confidence: "low" } })
     );
     expect(text).toContain("low confidence");
   });
 
-  it("shows why_now rather than the generic priority reason", () => {
+  it("shows the suggested angle rather than the generic priority reason", () => {
     const text = renderApprovalCard(card());
-    expect(text).toContain("Collection was due to drop this fall");
+    expect(text).toContain("lead with the buydown");
+  });
+
+  // Section 3.2: the card tells Eddie what to raise. It never contains a
+  // message for him to send — that whole subsystem is gone.
+  it("carries an angle, not a draft", () => {
+    const text = renderApprovalCard(card());
+    expect(text).not.toMatch(/^Hi |^Hey |^Hello /m);
   });
 
   it("falls back to the priority reason when there is no lead state", () => {
@@ -77,9 +92,9 @@ describe("renderApprovalCard", () => {
     expect(text).toContain("Scheduled touch");
   });
 
-  it("shows the blocker evidence quote, so the claim can be checked", () => {
+  it("shows the evidence quote, so the claim can be checked", () => {
     const text = renderApprovalCard(card());
-    expect(text).toContain("got denied because of my credit score");
+    expect(text).toContain("That rate is higher than I was expecting");
   });
 
   it("shows the last inbound message verbatim", () => {

@@ -62,11 +62,11 @@ function buildDecisionTrace(input: {
     // What the classifier believed, and what it could prove.
     lead_state: leadState
       ? {
-          lead_temp: leadState.lead_temp,
-          blocker: leadState.blocker,
-          blocker_confidence: leadState.blocker_confidence,
-          blocker_evidence: leadState.blocker_evidence,
-          why_now: leadState.why_now,
+          pitch_response: leadState.pitch_response,
+          evidence_confidence: leadState.evidence_confidence,
+          evidence: leadState.evidence,
+          suggested_angle: leadState.suggested_angle,
+          days_since_pitch: leadState.days_since_pitch,
           recommended_action: leadState.recommended_action,
         }
       : null,

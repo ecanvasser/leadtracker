@@ -7,9 +7,9 @@ export const instant = false;
 
 /** What a card needs to be triageable at a glance. See 4.4. */
 export interface BoardMeta {
-  leadTemp: string | null;
-  blocker: string | null;
-  blockerConfidence: string | null;
+  pitchResponse: string | null;
+  evidenceConfidence: string | null;
+  daysSincePitch: number | null;
   /** ISO timestamp of the last outreach, or null if never contacted. */
   lastTouchAt: string | null;
 }
@@ -60,9 +60,9 @@ export default async function BoardPage() {
   for (const row of insightsRes.data ?? []) {
     const state = row.lead_state as LeadState | null;
     meta[row.contact_id] = {
-      leadTemp: state?.lead_temp ?? null,
-      blocker: state?.blocker && state.blocker !== "none" ? state.blocker : null,
-      blockerConfidence: state?.blocker_confidence ?? null,
+      pitchResponse: state?.pitch_response ?? null,
+      evidenceConfidence: state?.evidence_confidence ?? null,
+      daysSincePitch: state?.days_since_pitch ?? null,
       lastTouchAt: lastTouch[row.contact_id] ?? null,
     };
   }
@@ -71,9 +71,9 @@ export default async function BoardPage() {
   for (const [contactId, at] of Object.entries(lastTouch)) {
     if (!meta[contactId]) {
       meta[contactId] = {
-        leadTemp: null,
-        blocker: null,
-        blockerConfidence: null,
+        pitchResponse: null,
+        evidenceConfidence: null,
+        daysSincePitch: null,
         lastTouchAt: at,
       };
     }

@@ -95,11 +95,11 @@ interface DecisionTrace {
     is_overdue?: boolean;
   };
   lead_state?: {
-    lead_temp?: string;
-    blocker?: string;
-    blocker_confidence?: string;
-    blocker_evidence?: string | null;
-    why_now?: string;
+    pitch_response?: string;
+    evidence_confidence?: string;
+    evidence?: string | null;
+    suggested_angle?: string;
+    days_since_pitch?: number | null;
     recommended_action?: string;
   } | null;
   drafting?: {
@@ -790,26 +790,28 @@ export function DailyQueue() {
                       {currentItem.touch_label}
                     </Badge>
                   )}
-                  {currentItem.decision_trace?.lead_state?.lead_temp && (
+                  {currentItem.decision_trace?.lead_state?.pitch_response && (
                     <Badge variant="secondary" className="text-[10px] py-0">
-                      {currentItem.decision_trace.lead_state.lead_temp.replace(/_/g, " ")}
+                      {currentItem.decision_trace.lead_state.pitch_response.replace(/_/g, " ")}
                     </Badge>
                   )}
-                  {currentItem.decision_trace?.lead_state?.blocker &&
-                    currentItem.decision_trace.lead_state.blocker !== "none" && (
-                      <Badge variant="destructive" className="text-[10px] py-0">
-                        {currentItem.decision_trace.lead_state.blocker.replace(/_/g, " ")}
-                      </Badge>
-                    )}
+                  {/* Section 5: days since pitch on the card. Rendered only
+                      when known — 0 would read as "just pitched". */}
+                  {currentItem.decision_trace?.lead_state?.days_since_pitch != null && (
+                    <Badge variant="outline" className="text-[10px] py-0">
+                      {currentItem.decision_trace.lead_state.days_since_pitch}d since pitch
+                    </Badge>
+                  )}
                   {currentItem.decision_trace?.drafting?.validated === false && (
                     <Badge variant="destructive" className="text-[10px] py-0">
                       unvalidated draft
                     </Badge>
                   )}
                 </div>
-                {currentItem.decision_trace?.lead_state?.why_now && (
+                {/* The angle, not a draft. Eddie writes the message. */}
+                {currentItem.decision_trace?.lead_state?.suggested_angle && (
                   <p className="text-[11px] text-muted-foreground mt-1.5">
-                    {currentItem.decision_trace.lead_state.why_now}
+                    {currentItem.decision_trace.lead_state.suggested_angle}
                   </p>
                 )}
               </div>
@@ -1076,8 +1078,8 @@ function DecisionTracePanel({ trace }: { trace: DecisionTrace }) {
       `${trace.priority.score}${base != null ? ` (base ${base}${trace.priority.is_overdue ? " + 400 overdue" : ""})` : ""}`,
     ]);
   }
-  if (trace.lead_state?.blocker_confidence) {
-    rows.push(["Blocker confidence", trace.lead_state.blocker_confidence]);
+  if (trace.lead_state?.evidence_confidence) {
+    rows.push(["Evidence confidence", trace.lead_state.evidence_confidence]);
   }
 
   const d = trace.drafting;
@@ -1112,11 +1114,11 @@ function DecisionTracePanel({ trace }: { trace: DecisionTrace }) {
         ))}
       </dl>
 
-      {trace.lead_state?.blocker_evidence && (
+      {trace.lead_state?.evidence && (
         <div className="text-[11px]">
-          <p className="text-muted-foreground mb-0.5">Blocker evidence (verbatim)</p>
+          <p className="text-muted-foreground mb-0.5">Evidence (verbatim)</p>
           <blockquote className="border-l-2 border-border pl-2 italic">
-            {trace.lead_state.blocker_evidence}
+            {trace.lead_state.evidence}
           </blockquote>
         </div>
       )}

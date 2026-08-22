@@ -11,7 +11,7 @@ import {
   DEFAULT_CADENCE_CONFIG,
   type CadenceConfig,
 } from "@/lib/cadence/config";
-import type { LeadState } from "@/lib/insights/lead-state";
+import type { LeadState, PitchResponse } from "@/lib/insights/lead-state";
 
 /**
  * Phase 7 retirement: the in_market and unresponsive lanes are gone, along
@@ -134,6 +134,26 @@ export function daysSinceLastTouch(
   return Math.max(0, days);
 }
 
+/**
+ * Human-readable name for a pitch_response, for hold reasons and card copy.
+ *
+ * A table rather than a string replace: "soft_no" reads as "soft no", which is
+ * not what a broker calls it, and "converted_signal" is not "converted signal".
+ */
+export function pitchLabel(response: PitchResponse): string {
+  const labels: Record<PitchResponse, string> = {
+    no_response: "No reply since the quote",
+    soft_no: "Soft no",
+    price_objection: "Pushed back on price",
+    timing_objection: "Pushed back on timing",
+    competitor: "Shopping another lender",
+    needs_info: "Wants more information",
+    positive_intent: "Sounded interested",
+    converted_signal: "Reads like a yes",
+  };
+  return labels[response];
+}
+
 function getLastChannelUsed(todayLog: OutreachLogEntry[]): "sms" | "email" | null {
   const msgs = todayLog.filter((e) => e.action_type !== "call");
   if (msgs.length === 0) return null;
@@ -185,9 +205,9 @@ export function planLead(
   const inputs: Record<string, unknown> = {
     age_days: ageDays,
     lane: LANE,
-    lead_temp: ctx.leadState?.lead_temp ?? null,
-    blocker: ctx.leadState?.blocker ?? null,
-    blocker_confidence: ctx.leadState?.blocker_confidence ?? null,
+    pitch_response: ctx.leadState?.pitch_response ?? null,
+    evidence_confidence: ctx.leadState?.evidence_confidence ?? null,
+    days_since_pitch: ctx.leadState?.days_since_pitch ?? null,
     recommended_action: ctx.leadState?.recommended_action ?? null,
     days_since_last_touch: sinceLastTouch,
     consecutive_unanswered: unanswered,
@@ -282,8 +302,8 @@ function planBlocked(
       ageDays,
       hold: true,
       holdReason:
-        state.blocker !== "none"
-          ? `Blocked on ${state.blocker.replace(/_/g, " ")} and nothing has changed`
+        state.pitch_response !== "no_response"
+          ? `${pitchLabel(state.pitch_response)} and nothing has changed since`
           : "Classified as hold — no reason to make contact",
       recommendAdverse: false,
       inputs: { ...inputs, rule: "classifier_hold" },
@@ -303,11 +323,11 @@ function planBlocked(
     };
   }
 
-  // A meaningful interval has passed. One touch, and it must speak to the
-  // blocker, which the card names alongside its evidence.
-  const blockerLabel = state?.blocker && state.blocker !== "none"
-    ? state.blocker.replace(/_/g, " ")
-    : "unknown blocker";
+  // A meaningful interval has passed. One touch, and the card names what the
+  // classifier read plus the angle to lead with.
+  const readLabel = state?.pitch_response
+    ? pitchLabel(state.pitch_response)
+    : "No classification yet";
 
   return {
     actions: [
@@ -315,7 +335,7 @@ function planBlocked(
         contactId: contact.id,
         actionType: "email",
         priorityScore: 60,
-        priorityReason: `Blocked on ${blockerLabel} — ${sinceLastTouch ?? "never"} days since last contact`,
+        priorityReason: `${readLabel} — ${sinceLastTouch ?? "never"} days since last contact`,
         touchLabel: null,
         lane: "blocked",
       },

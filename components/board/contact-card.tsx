@@ -17,27 +17,24 @@ interface ContactCardProps {
   isDragging?: boolean;
 }
 
-/** Temperature badges. Colour carries the urgency; the label carries the fact. */
-const TEMP_STYLE: Record<string, { label: string; className: string }> = {
-  in_market: { label: "In market", className: "bg-orange-500/15 text-orange-600 dark:text-orange-400" },
-  warming: { label: "Warming", className: "bg-amber-500/15 text-amber-600 dark:text-amber-400" },
-  stalled: { label: "Stalled", className: "bg-slate-500/15 text-slate-600 dark:text-slate-400" },
-  blocked: { label: "Blocked", className: "bg-red-500/15 text-red-600 dark:text-red-400" },
-  unresponsive: { label: "Quiet", className: "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400" },
+/**
+ * Post-pitch badges. Colour carries the urgency; the label carries the fact.
+ *
+ * Phase 7: these read what the lead did with the number rather than how warm
+ * they are. Warm is orange because it needs Eddie today; quiet is grey because
+ * it needs a decision, not a reaction.
+ */
+const PITCH_STYLE: Record<string, { label: string; className: string }> = {
+  converted_signal: { label: "Reads like a yes", className: "bg-green-500/15 text-green-600 dark:text-green-400" },
+  positive_intent: { label: "Interested", className: "bg-orange-500/15 text-orange-600 dark:text-orange-400" },
+  needs_info: { label: "Needs info", className: "bg-amber-500/15 text-amber-600 dark:text-amber-400" },
+  price_objection: { label: "Price", className: "bg-red-500/15 text-red-600 dark:text-red-400" },
+  timing_objection: { label: "Timing", className: "bg-slate-500/15 text-slate-600 dark:text-slate-400" },
+  competitor: { label: "Competitor", className: "bg-red-500/15 text-red-600 dark:text-red-400" },
+  soft_no: { label: "Soft no", className: "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400" },
+  no_response: { label: "No reply", className: "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400" },
 };
 
-const BLOCKER_LABEL: Record<string, string> = {
-  prior_denial: "prior denial",
-  credit: "credit",
-  equity: "equity",
-  income: "income",
-  dti: "DTI",
-  property: "property",
-  timing: "timing",
-  rate_shopping: "rate shopping",
-  competitor: "competitor",
-  non_responsive: "no response",
-};
 
 /** Whole days since an ISO timestamp. */
 function daysSince(iso: string): number {
@@ -75,8 +72,13 @@ export function ContactCard({
   };
 
   const leadAge = daysSince(contact.created_at);
-  const temp = meta?.leadTemp ? TEMP_STYLE[meta.leadTemp] : null;
-  const blocker = meta?.blocker ? BLOCKER_LABEL[meta.blocker] ?? meta.blocker : null;
+  const pitch = meta?.pitchResponse ? PITCH_STYLE[meta.pitchResponse] : null;
+  // Days since the pitch, when known. Null stays absent rather than rendering
+  // as 0 — "0 days" on a lead going cold is worse than no number at all.
+  const sincePitch =
+    meta?.daysSincePitch !== null && meta?.daysSincePitch !== undefined
+      ? `${meta.daysSincePitch}d`
+      : null;
 
   // 4.7 — a lead in a queue-eligible stage that is not enrolled is invisible to
   // the queue. That is the single most consequential thing that can be silently
@@ -147,19 +149,19 @@ export function ContactCard({
           {LOAN_TYPE_LABELS[contact.loan_type]}
         </Badge>
 
-        {temp && (
+        {pitch && (
           <Badge
             variant="secondary"
-            className={`text-[10px] px-1.5 py-0 font-normal border-0 ${temp.className}`}
+            className={`text-[10px] px-1.5 py-0 font-normal border-0 ${pitch.className}`}
           >
-            {temp.label}
+            {pitch.label}
+            {meta?.evidenceConfidence === "low" && "?"}
           </Badge>
         )}
 
-        {blocker && (
+        {sincePitch && (
           <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-normal">
-            {blocker}
-            {meta?.blockerConfidence === "low" && "?"}
+            {sincePitch}
           </Badge>
         )}
       </div>

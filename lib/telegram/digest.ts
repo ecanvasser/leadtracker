@@ -108,8 +108,8 @@ export async function sendMorningDigest(
       contactName: contact?.name ?? "Unknown",
       loanType: contact?.loan_type ?? "purchase",
       actionType: r.action_type,
-      whyNow: state?.why_now?.trim() || r.priority_reason,
-      leadTemp: state?.lead_temp ?? null,
+      whyNow: state?.suggested_angle?.trim() || r.priority_reason,
+      leadTemp: state?.pitch_response ?? null,
     };
   });
 

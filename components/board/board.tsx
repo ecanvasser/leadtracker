@@ -44,13 +44,13 @@ interface BoardProps {
 }
 
 /** Board filters. "excluded" surfaces hot leads the queue cannot see. */
-type BoardFilter = "all" | "excluded" | "blocked" | "in_market" | "untouched";
+type BoardFilter = "all" | "excluded" | "quiet" | "interested" | "untouched";
 
 const FILTER_LABELS: Record<BoardFilter, string> = {
   all: "All",
   excluded: "Not in queue",
-  in_market: "In market",
-  blocked: "Blocked",
+  interested: "Interested",
+  quiet: "Gone quiet",
   untouched: "Never contacted",
 };
 
@@ -211,10 +211,16 @@ export function Board({
     switch (filter) {
       case "excluded":
         return isQueueEligible(c.stage) && !c.insights_enabled;
-      case "in_market":
-        return m?.leadTemp === "in_market" || m?.leadTemp === "warming";
-      case "blocked":
-        return m?.leadTemp === "blocked" || m?.leadTemp === "stalled";
+      // Phase 7: filters read the post-pitch taxonomy. "Interested" is the
+      // lead who reacted well to the number; "quiet" is the one who did not
+      // react at all, which is the population the 2-day handoff rule targets.
+      case "interested":
+        return (
+          m?.pitchResponse === "positive_intent" ||
+          m?.pitchResponse === "converted_signal"
+        );
+      case "quiet":
+        return m?.pitchResponse === "no_response" || m?.pitchResponse === "soft_no";
       case "untouched":
         return !m?.lastTouchAt;
       default:

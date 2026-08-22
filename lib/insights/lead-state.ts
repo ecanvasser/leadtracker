@@ -1,17 +1,28 @@
 /**
  * Lead state classification — the "why" layer.
  *
- * Produces a structured, auditable record of what the engine believes about a
- * lead and what it intends to do. Two rules make this trustworthy rather than
- * decorative, and both are enforced here in code rather than requested in the
- * prompt:
+ * Phase 7 repurposed this from a general lead taxonomy to a post-pitch one.
+ * Classification now runs only for leads in Quoted – Follow Up, because that
+ * is the only stage QUEUE_ELIGIBLE_STAGES covers: everything earlier Eddie
+ * works by hand and already understands. The question is no longer "how warm
+ * is this lead" but "they have heard the number — what did they do with it".
  *
- * 1. A blocker must be backed by a verbatim quote from the pulled history. If
- *    the quote is not actually in the history, the blocker is discarded.
- *    "Unknown" is more useful than a confident guess.
+ * The machinery is unchanged and so are the two rules that make it
+ * trustworthy rather than decorative. Both are enforced here in code rather
+ * than merely requested in the prompt:
  *
- * 2. A blocked lead with no fired trigger is held, not messaged. The engine is
- *    allowed — required — to recommend doing nothing.
+ * 1. A read of the lead must be backed by a verbatim quote from the pulled
+ *    history. If the quote is not actually there, the read is discarded and
+ *    the lead falls back to no_response at low confidence. This matters more
+ *    now than it did before: a hallucinated "soft_no" can hand a live deal to
+ *    a cold campaign under Eddie's name.
+ *
+ * 2. Doing nothing is a valid outcome. `hold` stays in the action set.
+ *
+ * Note on what this does NOT produce: there is no draft. The output is a
+ * suggested_angle — one line naming what to lead with. Eddie writes the
+ * message. That is the whole of section 3.2, and it replaces a drafting
+ * subsystem that cost roughly four times as much.
  */
 
 import { callModel, type ModelUsage } from "@/lib/ai/models";
@@ -22,112 +33,138 @@ import {
   type BonzoProspect,
 } from "@/lib/bonzo/client";
 
-export const LEAD_TEMPS = [
-  "in_market",
-  "warming",
-  "stalled",
-  "blocked",
-  "unresponsive",
-] as const;
-export type LeadTemp = (typeof LEAD_TEMPS)[number];
-
-export const BLOCKERS = [
-  "none",
-  "prior_denial",
-  "credit",
-  "equity",
-  "income",
-  "dti",
-  "property",
-  "timing",
-  "rate_shopping",
+/**
+ * What the lead did with the number after being pitched.
+ *
+ * Ordered roughly from least to most engaged. `no_response` is the honest
+ * default and the fallback whenever evidence cannot be verified.
+ */
+export const PITCH_RESPONSES = [
+  "no_response",
+  "soft_no",
+  "price_objection",
+  "timing_objection",
   "competitor",
-  "non_responsive",
+  "needs_info",
+  "positive_intent",
+  "converted_signal",
 ] as const;
-export type Blocker = (typeof BLOCKERS)[number];
+export type PitchResponse = (typeof PITCH_RESPONSES)[number];
 
-export const RECOMMENDED_ACTIONS = ["sms", "email", "call", "hold"] as const;
+/**
+ * What to do next.
+ *
+ * - follow_up — surface a card; Eddie writes the message.
+ * - hold      — do nothing. Still a valid, deliberate answer.
+ * - hand_off  — pass to a Bonzo nurture campaign and stop working individually.
+ * - convert   — they are moving; this belongs in App In.
+ *
+ * `convert` is advisory only. D4 settles conversion detection as Eddie moving
+ * the lead in LeadTracker; nothing in the system acts on this value on its
+ * own, and nothing should start.
+ */
+export const RECOMMENDED_ACTIONS = [
+  "follow_up",
+  "hold",
+  "hand_off",
+  "convert",
+] as const;
 export type RecommendedAction = (typeof RECOMMENDED_ACTIONS)[number];
 
+/** Reads that assert something specific happened, and therefore need a quote. */
+const EVIDENCE_REQUIRED: readonly PitchResponse[] = PITCH_RESPONSES.filter(
+  (r) => r !== "no_response"
+);
+
+/** Actions too consequential to take on unverified evidence. */
+const EVIDENCE_GATED_ACTIONS: readonly RecommendedAction[] = [
+  "hand_off",
+  "convert",
+];
+
 export interface LeadState {
-  lead_temp: LeadTemp;
-  blocker: Blocker;
-  /** Verbatim quote from the Bonzo history, with its date. */
-  blocker_evidence: string | null;
-  blocker_confidence: "high" | "medium" | "low";
-  unblock_path: string | null;
-  unblock_trigger: string | null;
+  pitch_response: PitchResponse;
+  /** Verbatim quote from the Bonzo history. Null when there is none. */
+  evidence: string | null;
+  evidence_confidence: "high" | "medium" | "low";
+  /**
+   * One line naming what to lead with — not a draft message.
+   * "She asked about closing costs, not rate — lead with the credit."
+   */
+  suggested_angle: string;
+  /** Computed from the history, never taken from the model. */
   last_inbound_at: string | null;
+  /** Computed from the history, never taken from the model. */
   last_outbound_at: string | null;
+  /**
+   * Days since the lead entered Quoted – Follow Up. Computed from
+   * contacts.stage_changed_at; null when that is unknown, which is honest
+   * rather than a guess. Never taken from the model.
+   */
+  days_since_pitch: number | null;
   recommended_action: RecommendedAction;
-  why_now: string;
+  /**
+   * Kept from the pre-Phase-7 shape although section 3.1 does not list it.
+   * The cadence engine and the snooze paths both read it, and dropping it
+   * would silently un-suppress every snoozed lead.
+   */
   suppress_until: string | null;
 }
 
+/**
+ * What the model is asked for.
+ *
+ * Deliberately smaller than LeadState: the three computed fields
+ * (last_inbound_at, last_outbound_at, days_since_pitch) are facts we can
+ * derive, so asking for them would spend tokens on values that get
+ * overwritten — and would invite a plausible-looking wrong one into an
+ * audit trail.
+ */
 export const LEAD_STATE_SCHEMA: Record<string, unknown> = {
   type: "object",
   properties: {
-    lead_temp: { type: "string", enum: [...LEAD_TEMPS] },
-    blocker: { type: "string", enum: [...BLOCKERS] },
-    blocker_evidence: {
+    pitch_response: { type: "string", enum: [...PITCH_RESPONSES] },
+    evidence: {
       type: ["string", "null"],
       description:
-        "A verbatim quote from the message history that evidences the blocker, copied exactly, with its date. Null if there is no such quote.",
+        "A verbatim quote from the message history that evidences the pitch_response, copied exactly, with its date. Null if there is no such quote.",
     },
-    blocker_confidence: { type: "string", enum: ["high", "medium", "low"] },
-    unblock_path: {
-      type: ["string", "null"],
-      description: "The specific concrete thing that would move this forward.",
-    },
-    unblock_trigger: {
-      type: ["string", "null"],
-      description:
-        "What external change would make it worth reaching out again. Null if nothing would.",
-    },
-    last_inbound_at: { type: ["string", "null"] },
-    last_outbound_at: { type: ["string", "null"] },
-    recommended_action: { type: "string", enum: [...RECOMMENDED_ACTIONS] },
-    why_now: {
+    evidence_confidence: { type: "string", enum: ["high", "medium", "low"] },
+    suggested_angle: {
       type: "string",
-      description: "One sentence referencing specific evidence.",
+      description:
+        "One line: what to lead with when following up. Not a message, not a greeting — the angle only.",
     },
+    recommended_action: { type: "string", enum: [...RECOMMENDED_ACTIONS] },
     suppress_until: {
       type: ["string", "null"],
       description: "ISO date before which this lead should not be contacted.",
     },
   },
   required: [
-    "lead_temp",
-    "blocker",
-    "blocker_evidence",
-    "blocker_confidence",
-    "unblock_path",
-    "unblock_trigger",
-    "last_inbound_at",
-    "last_outbound_at",
+    "pitch_response",
+    "evidence",
+    "evidence_confidence",
+    "suggested_angle",
     "recommended_action",
-    "why_now",
     "suppress_until",
   ],
   additionalProperties: false,
 };
 
-const CLASSIFY_SYSTEM = `You classify the state of a mortgage lead from their history, so the broker can see why a lead surfaced and decide whether to trust it.
+const CLASSIFY_SYSTEM = `You classify what a mortgage lead did after they were quoted a number, so the broker can see why a lead surfaced and decide whether to trust it.
 
-Two archetypes drive this:
-
-- Newer leads are actively in the market. Speed and availability win. The job is to get them talking and onto a call.
-- Older leads are almost always held back by a specific issue — a past denial, credit, equity, income, DTI, timing, or they are shopping another lender. The job is NOT to check in. It is to identify the blocker and either deliver a real reason it may have changed, or stay quiet.
+Every lead you see has already been pitched. They have heard the rate, the payment, or the cash-out figure. The only question is what happened next, and there are only a few real answers: they went quiet, they pushed back on price, they pushed back on timing, they went to a competitor, they want more information, they sounded interested, or they are moving forward.
 
 Rules you must follow:
 
-BLOCKER EVIDENCE. If you name a blocker other than "none", blocker_evidence must be a quote copied EXACTLY from the message history you were given — the same characters, not a paraphrase or a summary. Include its date. If you cannot find such a quote, set blocker to "none" and blocker_confidence to "low". An honest "unknown" is more useful than a confident guess, and a guess that cannot be checked is worse than no answer.
+EVIDENCE. If you report anything other than "no_response", the evidence field must be a quote copied EXACTLY from the message history you were given — the same characters, not a paraphrase or a summary. Include its date. If you cannot find such a quote, set pitch_response to "no_response" and evidence_confidence to "low".
 
-DOING NOTHING IS A VALID ANSWER. If the lead is blocked and nothing has changed that would unblock them, recommended_action is "hold". Do not invent a reason to make contact. A manufactured touch on a dead lead is the failure mode this whole system exists to prevent.
+This rule is the whole reason this output can be trusted. A wrong guess here does not just look silly — it can hand a live deal to a cold nurture campaign under the broker's own name, or stop him chasing someone who was about to sign. An honest "no_response" is always better than a confident invention.
 
-CALLS. If recommended_action is "call", that means a human should phone them. Do not draft a message for a call.
+DOING NOTHING IS A VALID ANSWER. If nothing has changed and there is no reason to make contact, recommended_action is "hold". Do not manufacture a reason. A pointless "just checking in" on a lead who is thinking is the failure mode this system exists to prevent.
 
-WHY_NOW must reference specific evidence — a date, a quote, a field from the loan file. "Following up" is not a reason.
+SUGGESTED_ANGLE IS NOT A MESSAGE. One line naming what to lead with, addressed to the broker, not to the prospect. "She asked about closing costs, not rate — lead with the lender credit." Not "Hi Dana, I wanted to follow up...". He writes the message himself; you tell him what to raise. If you have nothing specific, say what is missing rather than filling the space.
 
 Return only the JSON object.`;
 
@@ -143,12 +180,18 @@ export interface ClassifyInput {
   leadAgeDays: number;
   /** Today in the broker's timezone, so the model reasons about the right day. */
   todayLocal: string;
+  /**
+   * When the lead entered Quoted – Follow Up, from contacts.stage_changed_at.
+   * Drives days_since_pitch. Undefined for leads that moved into the stage
+   * before that column existed.
+   */
+  quotedAt?: string | null;
 }
 
 export interface ClassifyResult {
   state: LeadState;
   usage: ModelUsage;
-  /** Set when a claimed quote was not found and the blocker was discarded. */
+  /** Set when a claimed quote was not found and the read was discarded. */
   evidenceRejected: boolean;
 }
 
@@ -209,31 +252,36 @@ export function enforceLeadStateRules(
   const state: LeadState = { ...raw };
   let evidenceRejected = false;
 
-  // Rule 1: no inferred blockers without a verifiable quote.
-  if (state.blocker !== "none") {
-    const quote = state.blocker_evidence;
+  // Rule 1: no specific read without a verifiable quote.
+  if (EVIDENCE_REQUIRED.includes(state.pitch_response)) {
+    const quote = state.evidence;
     if (!quote || !quoteAppearsInHistory(quote, communications)) {
       evidenceRejected = true;
-      state.blocker = "none";
-      state.blocker_evidence = null;
-      state.blocker_confidence = "low";
-      // The unblock path was reasoning from a blocker we just discarded.
-      state.unblock_path = null;
-      state.unblock_trigger = null;
+      state.pitch_response = "no_response";
+      state.evidence = null;
+      state.evidence_confidence = "low";
     }
   }
 
-  // A blocker of "none" cannot carry high confidence in a blocker.
-  if (state.blocker === "none" && state.blocker_confidence === "high") {
-    state.blocker_confidence = "low";
+  // "No response" cannot be a high-confidence reading of anything.
+  if (state.pitch_response === "no_response" && state.evidence_confidence === "high") {
+    state.evidence_confidence = "low";
   }
 
-  // Rule 2: a blocked lead with no fired trigger is held, not messaged.
-  if (
-    (state.lead_temp === "blocked" || state.lead_temp === "stalled") &&
-    !hasFiredTrigger(state)
-  ) {
-    state.recommended_action = "hold";
+  /*
+   * Rule 2: the two consequential actions require evidence that survived.
+   *
+   * hand_off starts real messaging under Eddie's name and is awkward to undo;
+   * convert stops him chasing someone. Neither is a decision to take on a
+   * quote that turned out not to exist. Downgrading to follow_up surfaces the
+   * lead to a human instead of acting on a hallucination.
+   *
+   * This does not stop the 2-day rule from handing anyone off — that is a
+   * workflow firing on elapsed time, which is observable fact rather than a
+   * model's reading.
+   */
+  if (evidenceRejected && EVIDENCE_GATED_ACTIONS.includes(state.recommended_action)) {
+    state.recommended_action = "follow_up";
   }
 
   // Rule 3: a suppression date in the future overrides any outreach.
@@ -244,20 +292,6 @@ export function enforceLeadStateRules(
   return { state, evidenceRejected };
 }
 
-/**
- * Whether an unblock trigger has actually fired.
- *
- * Conservative on purpose. The model describes a trigger in prose ("if rates
- * drop below what they were quoted"); nothing in the system observes rate
- * movements yet, so no described trigger counts as fired. When a real signal
- * source exists this is where it plugs in — until then the honest answer is
- * that we cannot know, and the honest behaviour is to hold.
- */
-export function hasFiredTrigger(state: LeadState): boolean {
-  void state;
-  return false;
-}
-
 function isFutureDate(iso: string): boolean {
   const t = new Date(iso).getTime();
   return Number.isFinite(t) && t > Date.now();
@@ -266,6 +300,13 @@ function isFutureDate(iso: string): boolean {
 function buildClassifyMessage(input: ClassifyInput): string {
   const mf = getMortgageFields(input.prospect);
   const parts: string[] = [`Today is ${input.todayLocal}. Lead age: ${input.leadAgeDays} days.`];
+
+  const days = daysSincePitch(input.quotedAt, input.todayLocal);
+  parts.push(
+    days === null
+      ? "Days since the quote was sent: unknown."
+      : `Days since the quote was sent: ${days}.`
+  );
 
   if (mf) {
     const fields = Object.entries(mf)
@@ -288,7 +329,7 @@ function buildClassifyMessage(input: ClassifyInput): string {
       })
       .join("\n");
     parts.push(
-      `MESSAGE HISTORY (oldest to newest). Any quote you use as blocker_evidence must be copied exactly from here:\n${thread}`
+      `MESSAGE HISTORY (oldest to newest). Any quote you use as evidence must be copied exactly from here:\n${thread}`
     );
   } else {
     parts.push("MESSAGE HISTORY: none. No message has been exchanged.");
@@ -301,6 +342,81 @@ function buildClassifyMessage(input: ClassifyInput): string {
   }
 
   return parts.join("\n\n");
+}
+
+/**
+ * Whole days between the pitch and today.
+ *
+ * Null rather than zero when the pitch date is unknown: a lead that moved into
+ * Quoted – Follow Up before stage_changed_at existed genuinely has no pitch
+ * date, and reporting "0 days since pitch" would read as "just pitched" and
+ * suppress exactly the follow-up that is overdue.
+ */
+export function daysSincePitch(
+  quotedAt: string | null | undefined,
+  todayLocal: string
+): number | null {
+  if (!quotedAt) return null;
+  const start = new Date(quotedAt).getTime();
+  const now = new Date(`${todayLocal}T00:00:00Z`).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(now)) return null;
+  const startDay = new Date(quotedAt).toISOString().slice(0, 10);
+  const diff =
+    (Date.parse(`${todayLocal}T00:00:00Z`) - Date.parse(`${startDay}T00:00:00Z`)) /
+    86_400_000;
+  return Number.isFinite(diff) ? Math.max(0, Math.round(diff)) : null;
+}
+
+/**
+ * Hours between scheduled classifications. Twice daily (spec 3.3).
+ *
+ * The cache refresh stays on its 15-minute schedule — reading Bonzo is free
+ * and reply and opt-out detection need to be fast. Only the thinking is
+ * rationed, which is the whole shape of the cost model: refreshing is free,
+ * thinking about it costs money.
+ */
+export const CLASSIFY_INTERVAL_HOURS = 12;
+
+/**
+ * Whether a lead is due for classification.
+ *
+ * Assumes the caller has already established that something is new — the
+ * hasNewMessages guard runs first and returns before this is reached, so a
+ * poll that found nothing never gets here and never spends a token.
+ *
+ * Three cases, in order:
+ *
+ *   - Never classified. Classify; there is nothing to show on the card yet.
+ *   - A new inbound reply. Classify immediately — that is the moment the
+ *     picture changes, and waiting up to twelve hours to notice someone
+ *     answered is the opposite of what this is for.
+ *   - Otherwise, twice daily. New outbound activity alone is Eddie sending
+ *     something; it does not change what the lead thinks.
+ */
+export function shouldClassify(opts: {
+  hasNewInbound: boolean;
+  lastClassifiedAt: string | null | undefined;
+  now?: Date;
+  intervalHours?: number;
+}): { classify: boolean; reason: string } {
+  const { hasNewInbound, lastClassifiedAt } = opts;
+  const now = opts.now ?? new Date();
+  const intervalHours = opts.intervalHours ?? CLASSIFY_INTERVAL_HOURS;
+
+  if (!lastClassifiedAt) return { classify: true, reason: "never_classified" };
+  if (hasNewInbound) return { classify: true, reason: "new_inbound" };
+
+  const last = new Date(lastClassifiedAt).getTime();
+  if (!Number.isFinite(last)) {
+    // An unparseable timestamp is treated as never classified rather than as
+    // "recently classified" — failing towards a known-good record.
+    return { classify: true, reason: "unreadable_timestamp" };
+  }
+
+  const hoursSince = (now.getTime() - last) / 3_600_000;
+  return hoursSince >= intervalHours
+    ? { classify: true, reason: "interval_elapsed" }
+    : { classify: false, reason: "classified_recently" };
 }
 
 /** Classifies one lead. Uses the analysis model — this is the judgment step. */
@@ -319,7 +435,7 @@ export async function classifyLeadState(
   if (!result.parsed) throw new Error("Lead state response could not be parsed");
 
   const { state, evidenceRejected } = enforceLeadStateRules(
-    withObservedTimestamps(result.parsed, input.communications),
+    withObservedFacts(result.parsed, input),
     input.communications
   );
 
@@ -327,16 +443,24 @@ export async function classifyLeadState(
 }
 
 /**
- * Overwrites the inbound/outbound timestamps with what the history actually
- * shows. These are facts we can compute; there is no reason to trust a model
- * to transcribe them, and a wrong one silently distorts the queue's priority.
+ * Overwrites every field we can observe with what the record actually shows.
+ *
+ * These are facts, not judgments. There is no reason to trust a model to
+ * transcribe them, and a wrong one silently distorts both the queue's ordering
+ * and any workflow trigger that reads them.
  */
-export function withObservedTimestamps(
+export function withObservedFacts(
   state: LeadState,
-  communications: { direction: string; created_at: string }[]
+  input: {
+    // Only the two fields actually read, so callers and tests are not forced
+    // to construct a full ClassifyInput to compute a timestamp.
+    communications: { direction: string; created_at: string }[];
+    quotedAt?: string | null;
+    todayLocal: string;
+  }
 ): LeadState {
   const latest = (match: (d: string) => boolean): string | null => {
-    const times = communications
+    const times = input.communications
       .filter((c) => match(c.direction))
       .map((c) => new Date(c.created_at).getTime())
       .filter((t) => Number.isFinite(t));
@@ -348,5 +472,6 @@ export function withObservedTimestamps(
     ...state,
     last_inbound_at: latest(isInbound),
     last_outbound_at: latest(isOutbound),
+    days_since_pitch: daysSincePitch(input.quotedAt, input.todayLocal),
   };
 }

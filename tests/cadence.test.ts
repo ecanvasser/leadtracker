@@ -169,16 +169,14 @@ import type { LeadState } from "@/lib/insights/lead-state";
 
 function leadState(overrides: Partial<LeadState> = {}): LeadState {
   return {
-    lead_temp: "blocked",
-    blocker: "credit",
-    blocker_evidence: "got denied because of my credit score",
-    blocker_confidence: "high",
-    unblock_path: "Re-pull once the collection ages off",
-    unblock_trigger: "Collection drops off",
+    pitch_response: "price_objection",
+    evidence: "That rate is higher than I was expecting",
+    evidence_confidence: "high",
+    suggested_angle: "He balked at the rate, not the payment — lead with the buydown.",
     last_inbound_at: null,
     last_outbound_at: null,
+    days_since_pitch: 2,
     recommended_action: "hold",
-    why_now: "Denied on credit in July",
     suppress_until: null,
     ...overrides,
   };
@@ -196,7 +194,7 @@ describe("blocked lane holds rather than manufacturing a touch", () => {
     expect(plan.hold).toBe(true);
     expect(plan.actions).toEqual([]);
     expect(plan.lane).toBe("blocked");
-    expect(plan.holdReason).toContain("credit");
+    expect(plan.holdReason).toContain("Pushed back on price");
   });
 
   it("holds a blocked lead touched inside the configured interval", () => {
@@ -204,7 +202,7 @@ describe("blocked lane holds rather than manufacturing a touch", () => {
     const plan = planLead(old, recentTouch, [], {
       timeZone: LA,
       now: THURSDAY_MORNING,
-      leadState: leadState({ recommended_action: "email" }),
+      leadState: leadState({ recommended_action: "follow_up" }),
     });
     expect(plan.hold).toBe(true);
     expect(plan.holdReason).toContain("21");
@@ -215,12 +213,12 @@ describe("blocked lane holds rather than manufacturing a touch", () => {
     const plan = planLead(old, oldTouch, [], {
       timeZone: LA,
       now: THURSDAY_MORNING,
-      leadState: leadState({ recommended_action: "email" }),
+      leadState: leadState({ recommended_action: "follow_up" }),
     });
     expect(plan.hold).toBe(false);
     expect(plan.actions).toHaveLength(1);
-    // The message must speak to the blocker, not check in.
-    expect(plan.actions[0].priorityReason).toContain("credit");
+    // The card must name what the classifier read, not "checking in".
+    expect(plan.actions[0].priorityReason).toContain("Pushed back on price");
   });
 
   it("holds a lead suppressed until a future date whatever the lane", () => {
@@ -228,7 +226,7 @@ describe("blocked lane holds rather than manufacturing a touch", () => {
     const plan = planLead(contact(), [], [], {
       timeZone: LA,
       now: THURSDAY_MORNING,
-      leadState: leadState({ lead_temp: "in_market", recommended_action: "sms", suppress_until: future }),
+      leadState: leadState({ recommended_action: "follow_up", suppress_until: future }),
     });
     expect(plan.hold).toBe(true);
     expect(plan.holdReason).toContain("Suppressed");
@@ -242,7 +240,7 @@ describe("blocked lane holds rather than manufacturing a touch", () => {
     });
     expect(plan.inputs.rule).toBe("classifier_hold");
     expect(plan.inputs.lane).toBe("blocked");
-    expect(plan.inputs.blocker).toBe("credit");
+    expect(plan.inputs.pitch_response).toBe("price_objection");
   });
 });
 
@@ -284,7 +282,7 @@ describe("an unanswered inbound outranks everything else", () => {
     const plan = planLead(contact({ created_at: "2026-06-20T16:00:00Z" }), [], comms, {
       timeZone: LA,
       now: THURSDAY_MORNING,
-      leadState: leadState({ lead_temp: "blocked", recommended_action: "hold" }),
+      leadState: leadState({ recommended_action: "hold" }),
     });
     expect(plan.hold).toBe(false);
     expect(plan.inputs.rule).toBe("unanswered_inbound");

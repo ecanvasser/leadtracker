@@ -56,26 +56,19 @@ export interface ApprovalCardInput {
   unvalidatedReasons?: string[];
 }
 
-const TEMP_BADGE: Record<string, string> = {
-  in_market: "🔥 In market",
-  warming: "🌤 Warming",
-  stalled: "⏸ Stalled",
-  blocked: "🚧 Blocked",
-  unresponsive: "🔇 Unresponsive",
-};
-
-const BLOCKER_LABEL: Record<string, string> = {
-  none: "",
-  prior_denial: "prior denial",
-  credit: "credit",
-  equity: "equity",
-  income: "income",
-  dti: "DTI",
-  property: "property",
-  timing: "timing",
-  rate_shopping: "rate shopping",
-  competitor: "competitor",
-  non_responsive: "no response",
+/**
+ * Phase 7: badges describe what the lead did with the number, not how warm
+ * they are. Every lead on a card has already been pitched.
+ */
+const PITCH_BADGE: Record<string, string> = {
+  no_response: "🔇 No reply",
+  soft_no: "🚪 Soft no",
+  price_objection: "💲 Price",
+  timing_objection: "🕰 Timing",
+  competitor: "🏦 Competitor",
+  needs_info: "❓ Needs info",
+  positive_intent: "🔥 Interested",
+  converted_signal: "✅ Reads like a yes",
 };
 
 export function escapeHtml(s: string): string {
@@ -103,27 +96,31 @@ export function renderApprovalCard(input: ApprovalCardInput): string {
   // --- State badges -------------------------------------------------------
   const badges: string[] = [];
   if (input.leadState) {
-    badges.push(TEMP_BADGE[input.leadState.lead_temp] ?? input.leadState.lead_temp);
-    const blocker = BLOCKER_LABEL[input.leadState.blocker];
-    if (blocker) {
-      const confidence =
-        input.leadState.blocker_confidence === "low" ? " (low confidence)" : "";
-      badges.push(`blocker: ${blocker}${confidence}`);
+    const st = input.leadState;
+    badges.push(PITCH_BADGE[st.pitch_response] ?? st.pitch_response);
+    if (st.evidence_confidence === "low") badges.push("low confidence");
+    // Section 5: days since pitch is on the card. Null reads as unknown rather
+    // than 0, which would say "just pitched" about a lead going cold.
+    if (st.days_since_pitch !== null) {
+      badges.push(
+        st.days_since_pitch === 1 ? "1 day since pitch" : `${st.days_since_pitch} days since pitch`
+      );
     }
   }
   if (input.touchLabel) badges.push(input.touchLabel);
   if (badges.length) lines.push(badges.join(" · "));
 
-  // --- Why now ------------------------------------------------------------
-  const why = input.leadState?.why_now?.trim() || input.priorityReason;
-  if (why) lines.push(`\n<i>${escapeHtml(why)}</i>`);
+  // --- The angle, not a draft ---------------------------------------------
+  // Section 3.2: one line naming what to lead with. Eddie writes the message.
+  const angle = input.leadState?.suggested_angle?.trim() || input.priorityReason;
+  if (angle) lines.push(`\n<i>${escapeHtml(angle)}</i>`);
 
-  // --- Blocker evidence, verbatim -----------------------------------------
-  // Shown because a blocker without its quote is exactly the confident guess
-  // the engine is built to avoid presenting as fact.
-  if (input.leadState?.blocker_evidence) {
+  // --- Evidence, verbatim --------------------------------------------------
+  // Shown because a reading without its quote is exactly the confident guess
+  // the classifier is built to avoid presenting as fact.
+  if (input.leadState?.evidence) {
     lines.push(
-      `\nEvidence: <i>“${escapeHtml(truncate(input.leadState.blocker_evidence, 200))}”</i>`
+      `\nEvidence: <i>“${escapeHtml(truncate(input.leadState.evidence, 200))}”</i>`
     );
   }
 

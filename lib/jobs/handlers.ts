@@ -20,7 +20,7 @@ import {
 } from "@/lib/bonzo/client";
 import { analyzeProspect } from "@/lib/insights/analyze";
 import type { Job } from "@/lib/jobs/queue";
-import { classifyLeadState } from "@/lib/insights/lead-state";
+import { classifyLeadState, shouldClassify } from "@/lib/insights/lead-state";
 import { getUserTimezone, localDate, leadAgeDays } from "@/lib/time";
 import { enqueueJob } from "@/lib/jobs/queue";
 import { scanForCallCommitments, recordProposedCall } from "@/lib/calls/scan";
@@ -82,7 +82,9 @@ export const refreshCache: JobHandler = async (supabase, job) => {
 
   const { data: contact, error: contactErr } = await supabase
     .from("contacts")
-    .select("id, user_id, bonzo_prospect_id, bonzo_email, insights_enabled, stage, created_at, phone")
+    .select(
+      "id, user_id, bonzo_prospect_id, bonzo_email, insights_enabled, stage, created_at, phone, stage_changed_at"
+    )
     .eq("id", contactId)
     .maybeSingle();
 
@@ -100,7 +102,9 @@ export const refreshCache: JobHandler = async (supabase, job) => {
 
   const { data: cache } = await supabase
     .from("insights_cache")
-    .select("ai_analysis, last_message_at, last_inbound_at, bonzo_prospect_data, lead_state, calls_scanned_through")
+    .select(
+      "ai_analysis, last_message_at, last_inbound_at, bonzo_prospect_data, lead_state, lead_state_at, calls_scanned_through"
+    )
     .eq("contact_id", contactId)
     .maybeSingle();
 
@@ -144,35 +148,6 @@ export const refreshCache: JobHandler = async (supabase, job) => {
     );
   }
 
-  // Both model calls sit behind the hasNew branch above. A refresh that finds
-  // nothing new has already returned without reaching either.
-  const timeZone = await getUserTimezone(contact.user_id, supabase);
-
-  const [aiAnalysis, classification] = await Promise.all([
-    analyzeProspect(resolved, communications, notes),
-    classifyLeadState({
-      prospect: resolved,
-      communications,
-      notes,
-      leadAgeDays: leadAgeDays(contact.created_at ?? new Date().toISOString(), timeZone),
-      todayLocal: localDate(new Date(), timeZone),
-    }).catch((e) => {
-      // Classification is valuable but not worth failing the whole refresh
-      // for — the cached history and analysis are still an improvement.
-      console.error(`[jobs/refresh_cache] classification failed for ${contactId}:`, e);
-      return null;
-    }),
-  ]);
-
-  if (classification?.evidenceRejected) {
-    // Worth seeing: the model named a blocker it could not evidence, and the
-    // rule discarded it. A run of these means the prompt needs tuning.
-    console.warn(
-      `[jobs/refresh_cache] contact ${contactId}: blocker discarded, quote not ` +
-        `found in history`
-    );
-  }
-
   // An inbound reply is the highest-value signal in the system. It is tracked
   // separately from last_message_at because an outbound send moves that
   // watermark, and a reply arriving afterwards would otherwise be missed.
@@ -185,6 +160,56 @@ export const refreshCache: JobHandler = async (supabase, job) => {
   const hasNewInbound =
     newestInbound !== null &&
     (previousInbound === null || newestInbound.getTime() > previousInbound);
+
+  // Both model calls sit behind the hasNew branch above. A refresh that finds
+  // nothing new has already returned without reaching either.
+  const timeZone = await getUserTimezone(contact.user_id, supabase);
+
+  /*
+   * Spec 3.3. Refreshing Bonzo is free; thinking about it is not. The lead is
+   * re-read every 15 minutes so a reply or an opt-out is noticed fast, but the
+   * classifier runs twice a day — or immediately when the prospect actually
+   * said something, which is the only event that changes what they think.
+   */
+  const due = shouldClassify({
+    hasNewInbound,
+    lastClassifiedAt: cache?.lead_state_at as string | null | undefined,
+  });
+
+  const [aiAnalysis, classification] = await Promise.all([
+    analyzeProspect(resolved, communications, notes),
+    !due.classify
+      ? Promise.resolve(null)
+      : classifyLeadState({
+      prospect: resolved,
+      communications,
+      notes,
+      leadAgeDays: leadAgeDays(contact.created_at ?? new Date().toISOString(), timeZone),
+      todayLocal: localDate(new Date(), timeZone),
+      // When the lead entered Quoted – Follow Up. Drives days_since_pitch,
+      // which is computed rather than asked of the model.
+      quotedAt: contact.stage_changed_at ?? null,
+        }).catch((e) => {
+      // Classification is valuable but not worth failing the whole refresh
+      // for — the cached history and analysis are still an improvement.
+          console.error(
+            `[jobs/refresh_cache] classification failed for ${contactId}:`,
+            e
+          );
+          return null;
+        }),
+  ]);
+
+  if (classification?.evidenceRejected) {
+    // Worth seeing: the model read something into the thread it could not
+    // evidence, and the rule discarded it back to no_response. A run of these
+    // means the prompt needs tuning — and every one of them is a handoff or a
+    // "stop chasing" that did not happen on a fabricated quote.
+    console.warn(
+      `[jobs/refresh_cache] contact ${contactId}: pitch_response discarded, ` +
+        `quote not found in history`
+    );
+  }
 
   // 3.4 — persist the number. It was previously fetched, displayed once and
   // thrown away, so a reminder had nothing to read off.
@@ -277,9 +302,13 @@ export const refreshCache: JobHandler = async (supabase, job) => {
     summary:
       `refreshed with ${communications.length} messages` +
       (classification
-        ? `; ${classification.state.lead_temp}/${classification.state.blocker} ` +
-          `-> ${classification.state.recommended_action}`
-        : "; classification failed") +
+        ? `; ${classification.state.pitch_response}` +
+          ` (${classification.state.evidence_confidence})` +
+          ` -> ${classification.state.recommended_action}` +
+          ` [${due.reason}]`
+        : due.classify
+          ? "; classification failed"
+          : `; not reclassified (${due.reason})`) +
       (hasNewInbound ? "; new inbound reply, queued a response" : "") +
       (proposedCall ? "; proposed a call for confirmation" : ""),
     usedModel: true,
