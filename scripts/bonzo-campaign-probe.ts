@@ -102,6 +102,31 @@ async function api<T>(
   return (text ? JSON.parse(text) : {}) as T;
 }
 
+/**
+ * Every campaign, following pagination.
+ *
+ * /v3/campaigns returns 25 per page. This account has 35, so a single
+ * unpaginated read silently reported 25 as if it were the whole list — which
+ * would have quietly truncated the workflow builder's campaign dropdown and
+ * made the handoff target unselectable depending on where it sorted.
+ */
+async function listAllCampaigns(): Promise<Campaign[]> {
+  const all: Campaign[] = [];
+  let page = 1;
+  // Bounded rather than while(true): a malformed meta block should not spin.
+  for (; page <= 50; page++) {
+    const res = await api<{
+      data: Campaign[];
+      meta?: { current_page: number; last_page: number };
+    }>(`/v3/campaigns?page=${page}`);
+
+    all.push(...res.data);
+    const last = res.meta?.last_page;
+    if (!res.data.length || !last || page >= last) break;
+  }
+  return all;
+}
+
 function names(cs: SimpleCampaign[] | undefined): string {
   if (!cs || cs.length === 0) return "(none)";
   return cs.map((c) => `${c.name} [${c.id}]`).join(", ");
@@ -147,7 +172,7 @@ async function readOnlyPhase(): Promise<Campaign[]> {
 
   console.log("\n=== Campaigns ===");
   try {
-    campaigns = (await api<{ data: Campaign[] }>("/v3/campaigns")).data;
+    campaigns = await listAllCampaigns();
   } catch (e) {
     if (!(e instanceof ScopeError)) throw e;
     scopeBlocked = true;
@@ -162,6 +187,7 @@ async function readOnlyPhase(): Promise<Campaign[]> {
     console.log("No campaigns exist on this account. Create one in Bonzo first.");
   }
 
+  console.log(`  ${campaigns.length} campaigns.`);
   for (const c of campaigns) {
     const seq = c.sequence
       ? `sequence "${c.sequence.name}" ${c.sequence.enabled === false ? "(DISABLED — safe to test with)" : "(enabled — will send)"}`
