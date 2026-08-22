@@ -55,8 +55,11 @@ function buildUserMessage(
 Name: ${name || "Unknown"}
 Email: ${prospect.email || "N/A"}
 Phone: ${prospect.phone || "N/A"}
-Status: ${prospect.status || "N/A"}
-Pipeline Stage: ${prospect.pipeline_stage?.name || "N/A"}`;
+Status: ${prospect.status || "N/A"}`;
+  // Bonzo's own pipeline stage used to be interpolated here. It is gone with
+  // the rest of the pipeline fields: the app does not read Bonzo pipelines,
+  // and feeding one to the classifier invited exactly the mirroring D4 ruled
+  // out. LeadTracker's own stage is the only stage that means anything here.
 
   if (mf) {
     // Field names transcribed from Bonzo's OpenAPI document. The previous list

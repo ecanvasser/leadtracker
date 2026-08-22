@@ -116,12 +116,6 @@ export interface BonzoTag {
   sequence_start?: string;
 }
 
-export interface BonzoPipelineStage {
-  id: number;
-  name: string;
-  pipeline_id: number;
-}
-
 export interface BonzoProspect {
   id: number;
   first_name: string | null;
@@ -131,8 +125,15 @@ export interface BonzoProspect {
   phone: string | null;
   phone_type?: string | null;
   status: string | null;
-  /** An object in the API, not a string. */
-  pipeline_stage: BonzoPipelineStage | null;
+  /**
+   * Bonzo's own pipeline fields are deliberately absent from this type AND
+   * stripped from every response — see stripBonzoPipeline(). Eddie's rule is
+   * that this app never reads or writes Bonzo pipelines, and D4 settles
+   * conversion detection as "he moves the lead in LeadTracker", not as
+   * mirroring Bonzo. Declaring the field would have made it available to the
+   * next person who needed a shortcut; stripping it means it is not there to
+   * reach for, and it never reaches insights_cache either.
+   */
   /** Objects with id/name, not bare strings. */
   tags: BonzoTag[];
   /** The real key. See BonzoMortgageFields. */
@@ -238,11 +239,31 @@ export interface BonzoNote {
   user_name: string | null;
 }
 
+/**
+ * Removes Bonzo's pipeline fields from a prospect record.
+ *
+ * BonzoProspect carries an index signature, so dropping the field from the
+ * type alone would not stop the data arriving — and refresh_cache persists the
+ * whole prospect object into insights_cache.bonzo_prospect_data, so an
+ * un-stripped response means Bonzo pipeline state lands in our database.
+ * Enforced here at the boundary, which is the only place every read passes
+ * through.
+ */
+export function stripBonzoPipeline<T>(prospect: T): T {
+  if (!prospect || typeof prospect !== "object") return prospect;
+  const copy = { ...(prospect as Record<string, unknown>) };
+  delete copy.pipeline_stage;
+  delete copy.pipeline;
+  delete copy.pipeline_id;
+  return copy as T;
+}
+
 /** Fetches one prospect by id — the authoritative full record. */
 export async function getProspect(prospectId: number): Promise<BonzoProspect | null> {
   const res = await bonzoFetch(`/v3/prospects/${prospectId}`);
   const json = await res.json();
-  return (json.data ?? json ?? null) as BonzoProspect | null;
+  const data = (json.data ?? json ?? null) as BonzoProspect | null;
+  return data ? stripBonzoPipeline(data) : null;
 }
 
 /**
@@ -275,7 +296,7 @@ export async function searchProspectByEmail(
 
   // Re-read by id so we always persist the complete record.
   const full = await getProspect(match.id).catch(() => null);
-  return full ?? match;
+  return full ?? stripBonzoPipeline(match);
 }
 
 export async function getCommunicationHistory(

@@ -34,6 +34,17 @@ const TOKEN = process.env.BONZO_API_TOKEN;
 const BASE = "https://app.getbonzo.com/api";
 const WRITE = process.argv.includes("--write");
 
+/**
+ * Both campaigns the write phase may touch must be named explicitly and must
+ * have a disabled sequence. Eddie's instruction: do not *prefer* a safe
+ * campaign, *require* one — his live campaigns are real nurture sequences and
+ * "Responded (NEW Quoted)" or "Credit Repair Campaign" are not acceptable
+ * collateral for a probe.
+ */
+const CAMPAIGN_ARGS = process.argv
+  .filter((a) => a.startsWith("--campaign="))
+  .map((a) => a.slice("--campaign=".length));
+
 if (!TOKEN) {
   console.error(
     "BONZO_API_TOKEN is not set.\n" +
@@ -206,28 +217,51 @@ async function readOnlyPhase(): Promise<Campaign[]> {
 }
 
 async function writePhase(campaigns: Campaign[]) {
-  if (campaigns.length < 2) {
+  if (CAMPAIGN_ARGS.length !== 2) {
     console.log(
-      "\nCannot run the write phase: need at least two campaigns read from\n" +
-        "/v3/campaigns, and " +
-        campaigns.length +
-        " were readable. If that is a scope problem, fix the token first —\n" +
-        "enrolling almost certainly needs the same scope listing does."
+      "\n--write needs exactly two campaigns, named explicitly:\n" +
+        '  --campaign="Probe A" --campaign="Probe B"\n\n' +
+        "They are not chosen automatically. Every campaign on this account is\n" +
+        "a live nurture sequence, and enrolling a prospect in the wrong one is\n" +
+        "not something a probe should risk."
     );
     return;
   }
 
-  // Prefer campaigns whose sequence is disabled or absent: nothing can go out
-  // even if the DNC flag were ignored.
-  const ranked = [...campaigns].sort((a, b) => {
-    const safe = (c: Campaign) => (!c.sequence || c.sequence.enabled === false ? 0 : 1);
-    return safe(a) - safe(b);
-  });
-  const [first, second] = ranked;
+  const chosen: Campaign[] = [];
+  for (const name of CAMPAIGN_ARGS) {
+    const match = campaigns.filter(
+      (c) => c.name.toLowerCase() === name.toLowerCase()
+    );
+    if (match.length === 0) {
+      console.log(`\nNo campaign named "${name}". Nothing was changed.`);
+      return;
+    }
+    if (match.length > 1) {
+      console.log(`\n"${name}" matches ${match.length} campaigns. Nothing was changed.`);
+      return;
+    }
+    chosen.push(match[0]);
+  }
 
+  // Hard requirement, not a preference. A campaign with an enabled sequence
+  // will start messaging on enrollment.
+  const unsafe = chosen.filter((c) => c.sequence && c.sequence.enabled !== false);
+  if (unsafe.length > 0) {
+    console.log(
+      "\nRefusing to run. These campaigns have an ENABLED sequence and would\n" +
+        "start messaging on enrollment:\n" +
+        unsafe.map((c) => `  [${c.id}] ${c.name}`).join("\n") +
+        "\n\nDisable the sequence in the Bonzo UI, or create an empty campaign\n" +
+        "for this, then re-run."
+    );
+    return;
+  }
+
+  const [first, second] = chosen;
   console.log("\n=== Write phase ===");
-  console.log(`  Campaign A: [${first.id}] ${first.name}`);
-  console.log(`  Campaign B: [${second.id}] ${second.name}`);
+  console.log(`  Campaign A: [${first.id}] ${first.name} — sequence disabled/absent`);
+  console.log(`  Campaign B: [${second.id}] ${second.name} — sequence disabled/absent`);
 
   const stamp = Date.now();
   console.log("\n  Creating a throwaway prospect…");
@@ -245,13 +279,23 @@ async function writePhase(campaigns: Campaign[]) {
   const id = created.data.id;
   console.log(`  Created prospect ${id}.`);
 
-  // Belt and braces before any campaign call. DNC first, so that even if a
-  // sequence somehow resolved a channel, Bonzo's own compliance layer blocks it.
-  console.log("  Marking DNC before touching any campaign…");
+  // Set DNC, then READ IT BACK. Setting a flag and assuming it took is exactly
+  // the assumption this probe exists to avoid making.
+  console.log("  Marking DNC…");
   await api(`/v3/prospects/${id}/dnc`, { method: "POST", body: { value: true } });
 
-  const before = await api<{ data: Prospect }>(`/v3/prospects/${id}`);
-  console.log(`  Campaigns at start: ${names(before.data.campaigns)}`);
+  const verify = await api<{ data: Prospect }>(`/v3/prospects/${id}`);
+  if (verify.data.do_not_call !== true) {
+    console.log(
+      `\n  REFUSING TO CONTINUE. do_not_call read back as ` +
+        `${JSON.stringify(verify.data.do_not_call)}, not true.\n` +
+        `  No campaign call was made. Prospect ${id} exists and should be\n` +
+        `  deleted from the Bonzo UI.`
+    );
+    return;
+  }
+  console.log("  DNC confirmed true on read-back.");
+  console.log(`  Campaigns at start: ${names(verify.data.campaigns)}`);
 
   console.log(`\n  Enrolling in A [${first.id}]…`);
   await api(`/v3/prospects/${id}/campaign/${first.id}`, { method: "POST" });
@@ -271,9 +315,10 @@ async function writePhase(campaigns: Campaign[]) {
   } else if (ids.includes(second.id) && !ids.includes(first.id)) {
     console.log("  REPLACES. Only the second campaign survived.");
     console.log(
-      "  → A handoff silently removes a lead from everything else it was in.\n" +
-        "    The workflow action must read the current campaigns first and warn,\n" +
-        "    or the seed workflow must never fire on an already-enrolled lead."
+      "  → Confirms the assumption the handoff is being designed against:\n" +
+        "    refuse by default when a lead is already enrolled, per-workflow\n" +
+        "    opt-in to override, and record the displaced campaign so it can\n" +
+        "    be put back."
     );
   } else {
     console.log(`  INCONCLUSIVE. Campaign ids after both calls: [${ids.join(", ")}]`);
@@ -298,9 +343,13 @@ async function main() {
 
   if (!WRITE) {
     console.log(
-      "\nRe-run with --write to settle append-vs-replace definitively.\n" +
-        "That creates one throwaway prospect with no phone and no email, marks\n" +
-        "it DNC before any campaign call, and enrolls it in two campaigns."
+      "\nTo settle append-vs-replace, re-run as:\n" +
+        '  npx tsx scripts/bonzo-campaign-probe.ts --write \\\n' +
+        '      --campaign="<disabled campaign A>" --campaign="<disabled campaign B>"\n\n' +
+        "Both must exist and must have a disabled or absent sequence; the\n" +
+        "script refuses otherwise. It creates one throwaway prospect with no\n" +
+        "phone and no email, marks it DNC and verifies the flag read back true\n" +
+        "before any campaign call, then enrolls it in each in turn."
     );
     return;
   }

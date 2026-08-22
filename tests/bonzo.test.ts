@@ -10,6 +10,7 @@ import {
   BonzoSendRejectedError,
   BonzoRequestError,
   BonzoRateLimitError,
+  stripBonzoPipeline,
 } from "@/lib/bonzo/client";
 
 describe("getMortgageFields", () => {
@@ -342,5 +343,50 @@ describe("mapBonzoLoanType", () => {
     expect(mapBonzoLoanType({ loan_type: "", loan_purpose: "" })).toBeNull();
     expect(mapBonzoLoanType(null)).toBeNull();
     expect(mapBonzoLoanType(undefined)).toBeNull();
+  });
+});
+
+/**
+ * Eddie's rule: this app never reads or writes Bonzo pipelines. D4 settles
+ * conversion detection as him moving the lead in LeadTracker, so Bonzo's
+ * pipeline state has no job here — and it was previously both persisted into
+ * insights_cache.bonzo_prospect_data and interpolated into the classifier
+ * prompt.
+ *
+ * The type alone cannot enforce this: BonzoProspect carries an index
+ * signature, so an un-stripped response still smuggles the field through.
+ */
+describe("Bonzo pipeline fields never enter the app", () => {
+  it("strips pipeline_stage, pipeline and pipeline_id from a prospect", () => {
+    const raw = {
+      id: 5150,
+      first_name: "Dana",
+      email: "d@example.com",
+      pipeline_stage: { id: 261237, name: "Responded Leads", pipeline_id: 4317 },
+      pipeline: { id: 4317, name: "Main" },
+      pipeline_id: 4317,
+      tags: [{ id: 1, name: "facebook" }],
+    };
+
+    const clean = stripBonzoPipeline(raw) as Record<string, unknown>;
+
+    expect(clean).not.toHaveProperty("pipeline_stage");
+    expect(clean).not.toHaveProperty("pipeline");
+    expect(clean).not.toHaveProperty("pipeline_id");
+    // Everything else survives untouched — this is a scalpel, not a whitelist.
+    expect(clean.id).toBe(5150);
+    expect(clean.email).toBe("d@example.com");
+    expect(clean.tags).toEqual([{ id: 1, name: "facebook" }]);
+  });
+
+  it("does not mutate the object it was given", () => {
+    const raw = { id: 1, pipeline_stage: { id: 2, name: "X", pipeline_id: 3 } };
+    stripBonzoPipeline(raw);
+    expect(raw.pipeline_stage).toEqual({ id: 2, name: "X", pipeline_id: 3 });
+  });
+
+  it("passes through null and non-objects rather than throwing", () => {
+    expect(stripBonzoPipeline(null)).toBeNull();
+    expect(stripBonzoPipeline(undefined)).toBeUndefined();
   });
 });
