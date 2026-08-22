@@ -20,7 +20,6 @@ import { sendQueueItem, SendRefusedError } from "@/lib/outreach/send";
 import {
   CB,
   SNOOZE_LABELS,
-  renderApprovalCard,
   approvalKeyboard,
   snoozeKeyboard,
   escapeHtml,
@@ -30,7 +29,6 @@ import { buildCardInput, pushNextCard, releaseCard } from "@/lib/telegram/push";
 import { DIGEST_START, handleDigestStart } from "@/lib/telegram/digest";
 import { isCallCallback, handleCallCallback } from "@/lib/telegram/call-confirm";
 import { addLocalDays, getUserTimezone, localDate } from "@/lib/time";
-import type { SessionData } from "@/lib/telegram/session";
 
 /**
  * Claims a one-shot action for a queue item.
@@ -114,10 +112,7 @@ function atLocalHour(date: string, hour: number, timeZone: string): Date {
  * Returns true when it consumed the callback, so the generic command handler
  * can ignore it.
  */
-export async function handleApprovalCallback(
-  ctx: Context,
-  session: SessionData
-): Promise<boolean> {
+export async function handleApprovalCallback(ctx: Context): Promise<boolean> {
   const data = ctx.callbackQuery?.data;
   if (!data || !ctx.from) return false;
 
@@ -205,24 +200,6 @@ export async function handleApprovalCallback(
       await applySend(ctx, supabase, userId, queueItemId);
       return true;
 
-    case CB.edit:
-      await ctx.answerCallbackQuery();
-      session.action = "queue_edit";
-      session.queueItemId = queueItemId;
-      await ctx.reply(
-        "Send me the replacement text. Your next message becomes the body verbatim, then it sends."
-      );
-      return true;
-
-    case CB.redraft:
-      await ctx.answerCallbackQuery();
-      session.action = "queue_redraft";
-      session.queueItemId = queueItemId;
-      await ctx.reply(
-        'What should change? For example: "shorter", "drop the second sentence", "mention the credit timeline".'
-      );
-      return true;
-
     default:
       return false;
   }
@@ -232,8 +209,7 @@ async function applySend(
   ctx: Context,
   supabase: SupabaseClient,
   userId: string,
-  queueItemId: string,
-  overrideBody?: string
+  queueItemId: string
 ): Promise<void> {
   // Claim before sending. A second tap loses the race and is answered without
   // anything reaching Bonzo.
@@ -246,9 +222,7 @@ async function applySend(
   await ctx.answerCallbackQuery({ text: "Sending…" });
 
   try {
-    const outcome = await sendQueueItem(supabase, userId, queueItemId, {
-      ...(overrideBody !== undefined ? { overrideBody } : {}),
-    });
+    const outcome = await sendQueueItem(supabase, userId, queueItemId, {});
 
     await finishCard(ctx, supabase, userId, queueItemId, `✅ ${outcome.receipt}`);
   } catch (e) {
@@ -373,83 +347,3 @@ async function pushNextIfQuiet(
   }
 }
 
-/**
- * Handles the text reply that follows Edit or Redraft.
- *
- * Returns true when it consumed the message.
- */
-export async function handleApprovalText(
-  ctx: Context,
-  session: SessionData,
-  clear: () => void
-): Promise<boolean> {
-  const text = ctx.message?.text?.trim();
-  if (!text || !ctx.from) return false;
-
-  const action = session.action;
-  if (action !== "queue_edit" && action !== "queue_redraft") return false;
-
-  const queueItemId = session.queueItemId;
-  if (!queueItemId) {
-    clear();
-    return false;
-  }
-
-  const supabase = createServiceClient();
-  const userId = await getUserIdByTelegramId(supabase, ctx.from.id);
-  if (!userId) {
-    clear();
-    return true;
-  }
-
-  if (action === "queue_edit") {
-    clear();
-    // The broker's text is the message, verbatim. It is not re-drafted, not
-    // re-validated, and not "improved" — he wrote it, it sends as written.
-    await applySend(ctx, supabase, userId, queueItemId, text);
-    return true;
-  }
-
-  clear();
-  await ctx.reply("Redrafting…");
-  await redraft(ctx, supabase, userId, queueItemId, text);
-  return true;
-}
-
-/** Regenerates a draft from an instruction and re-presents it for approval. */
-async function redraft(
-  ctx: Context,
-  supabase: SupabaseClient,
-  userId: string,
-  queueItemId: string,
-  instruction: string
-): Promise<void> {
-  const { reviseQueueDraft } = await import("@/lib/ai/revise");
-
-  try {
-    const revised = await reviseQueueDraft(supabase, userId, queueItemId, instruction);
-
-    await supabase
-      .from("daily_queue")
-      .update({
-        draft_message: revised.body,
-        ...(revised.subject !== null ? { email_subject: revised.subject } : {}),
-      })
-      .eq("id", queueItemId);
-
-    const input = await buildCardInput(supabase, queueItemId);
-    if (!input) return;
-
-    await ctx.reply(renderApprovalCard(input), {
-      parse_mode: "HTML",
-      reply_markup: approvalKeyboard({
-        queueItemId,
-        actionType: input.actionType,
-        bonzoProspectId: input.bonzoProspectId,
-      }),
-    });
-  } catch (e) {
-    const message = e instanceof Error ? e.message : "Redraft failed.";
-    await ctx.reply(`⚠️ ${escapeHtml(message)}`, { parse_mode: "HTML" });
-  }
-}

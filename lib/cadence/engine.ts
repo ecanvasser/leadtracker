@@ -2,7 +2,6 @@ import { Contact } from "@/types/db";
 import { isInbound, isOutbound } from "@/lib/bonzo/client";
 import {
   DEFAULT_TIMEZONE,
-  addLocalDays,
   isLocalSaturday,
   isLocalSunday,
   leadAgeDays,
@@ -15,21 +14,21 @@ import {
 import type { LeadState } from "@/lib/insights/lead-state";
 
 /**
- * Lane selection is explicit and testable.
+ * Phase 7 retirement: the in_market and unresponsive lanes are gone, along
+ * with selectLane(). What is left is the lane that holds by default and only
+ * speaks when something actually changed — which is the behaviour post-pitch
+ * follow-up needs, and the opposite of the scheduled drip the other two lanes
+ * existed to drive.
  *
- * The old engine treated every lead identically, which is why the output was
- * unusable: a lead blocked on a credit event got the same "scheduled touch"
- * treatment as one that opted in this morning.
- *
- * - in_market  — actively shopping. Speed and availability win. Get them
- *                talking and onto a call.
- * - blocked    — held back by a specific, identified issue. The job is not to
- *                check in. Either deliver a real reason the blocker may have
- *                changed, or stay quiet.
- * - unresponsive — they are not answering. Very low frequency, channel
- *                rotation, and a hard stop rather than an indefinite drip.
+ * The type is a single member rather than being deleted outright because
+ * `lane` is still written to daily_queue.lane and read back into the decision
+ * trace. What a row means now lives in `inputs.rule`, which was always the
+ * more specific field.
  */
-export type Lane = "in_market" | "blocked" | "unresponsive";
+export type Lane = "blocked";
+
+/** The only surviving lane. See the note above. */
+const LANE: Lane = "blocked";
 
 export interface CadenceContext {
   timeZone: string;
@@ -88,48 +87,15 @@ export interface LeadPlan {
   hold: boolean;
   /** Why it held, in a sentence, for the decision trace and the UI. */
   holdReason: string | null;
-  /** Set when a lead has exhausted the unresponsive lane. */
+  /** Set when a lead has gone quiet long enough to be worth writing off. */
   recommendAdverse: boolean;
   /** Inputs that drove the decision, recorded verbatim in decision_trace. */
   inputs: Record<string, unknown>;
 }
 
-interface CadenceTarget {
-  messagesTouches: number;
-  calls: number;
-  channelHint: ("sms" | "email")[];
-}
-
 // ---------------------------------------------------------------------------
 // Lane selection
 // ---------------------------------------------------------------------------
-
-/**
- * Chooses a lane from the classified lead state, falling back to age.
- *
- * Before a lead has been classified there is no evidence of a blocker, so a
- * young lead is treated as in-market and an old one as blocked. That mirrors
- * the two archetypes: new leads are shopping, old ones are stuck on something.
- */
-export function selectLane(
-  leadState: LeadState | null,
-  ageDays: number,
-  config: CadenceConfig
-): Lane {
-  if (leadState) {
-    switch (leadState.lead_temp) {
-      case "in_market":
-      case "warming":
-        return "in_market";
-      case "stalled":
-      case "blocked":
-        return "blocked";
-      case "unresponsive":
-        return "unresponsive";
-    }
-  }
-  return ageDays <= config.in_market_max_age_days ? "in_market" : "blocked";
-}
 
 /**
  * Consecutive outbound messages since the prospect last said anything.
@@ -168,38 +134,6 @@ export function daysSinceLastTouch(
   return Math.max(0, days);
 }
 
-// ---------------------------------------------------------------------------
-// In-market cadence (unchanged rhythm — it was roughly right)
-// ---------------------------------------------------------------------------
-
-function getCadenceTarget(ageDays: number): CadenceTarget {
-  if (ageDays === 0) {
-    return { messagesTouches: 3, calls: 2, channelHint: ["sms", "email", "sms"] };
-  }
-  if (ageDays <= 3) {
-    return { messagesTouches: 2, calls: 1, channelHint: ["sms", "email"] };
-  }
-  if (ageDays <= 7) {
-    return { messagesTouches: 1, calls: 1, channelHint: ["sms"] };
-  }
-  if (ageDays <= 14) {
-    return { messagesTouches: 1, calls: 0.5, channelHint: ["email"] };
-  }
-  if (ageDays <= 21) {
-    return { messagesTouches: 0.5, calls: 0.3, channelHint: ["sms"] };
-  }
-  if (ageDays <= 30) {
-    return { messagesTouches: 0.4, calls: 0.15, channelHint: ["email"] };
-  }
-  return { messagesTouches: 0.15, calls: 0.07, channelHint: ["email"] };
-}
-
-function shouldActToday(frequency: number, ageDays: number): number {
-  if (frequency >= 1) return Math.round(frequency);
-  const period = Math.round(1 / frequency);
-  return ageDays % period === 0 ? 1 : 0;
-}
-
 function getLastChannelUsed(todayLog: OutreachLogEntry[]): "sms" | "email" | null {
   const msgs = todayLog.filter((e) => e.action_type !== "call");
   if (msgs.length === 0) return null;
@@ -233,23 +167,6 @@ function detectUnansweredReply(
   return { hasUnanswered: false, lastReplyAge: null };
 }
 
-function checkOverdue(
-  ageDays: number,
-  recentLog: OutreachLogEntry[],
-  ctx: CadenceContext
-): boolean {
-  if (ageDays === 0) return false;
-
-  const yesterdayStr = addLocalDays(localDate(ctx.now, ctx.timeZone), -1);
-  const yesterdayActions = recentLog.filter(
-    (e) => localDate(e.created_at, ctx.timeZone) === yesterdayStr && e.status !== "skipped"
-  );
-
-  const target = getCadenceTarget(ageDays - 1);
-  const expectedTouches = shouldActToday(target.messagesTouches, ageDays - 1);
-  return yesterdayActions.length < expectedTouches && expectedTouches > 0;
-}
-
 // ---------------------------------------------------------------------------
 // Planning
 // ---------------------------------------------------------------------------
@@ -262,13 +179,12 @@ export function planLead(
 ): LeadPlan {
   const ctx = defaultCadenceContext(context);
   const ageDays = leadAgeDays(contact.created_at, ctx.timeZone, ctx.now);
-  const lane = selectLane(ctx.leadState, ageDays, ctx.config);
   const sinceLastTouch = daysSinceLastTouch(outreachHistory, bonzoCommunication, ctx);
   const unanswered = consecutiveUnanswered(bonzoCommunication);
 
   const inputs: Record<string, unknown> = {
     age_days: ageDays,
-    lane,
+    lane: LANE,
     lead_temp: ctx.leadState?.lead_temp ?? null,
     blocker: ctx.leadState?.blocker ?? null,
     blocker_confidence: ctx.leadState?.blocker_confidence ?? null,
@@ -281,7 +197,7 @@ export function planLead(
 
   const held = (reason: string, extra: Record<string, unknown> = {}): LeadPlan => ({
     actions: [],
-    lane,
+    lane: LANE,
     ageDays,
     hold: true,
     holdReason: reason,
@@ -293,8 +209,7 @@ export function planLead(
   if (!ctx.config.work_sunday && isLocalSunday(ctx.now, ctx.timeZone)) {
     return held("Sunday is switched off in cadence settings", { rule: "sunday_off" });
   }
-  const saturday = isLocalSaturday(ctx.now, ctx.timeZone);
-  if (!ctx.config.work_saturday && saturday) {
+  if (!ctx.config.work_saturday && isLocalSaturday(ctx.now, ctx.timeZone)) {
     return held("Saturday is switched off in cadence settings", { rule: "saturday_off" });
   }
 
@@ -323,32 +238,19 @@ export function planLead(
           priorityScore: 1000,
           priorityReason: `Unanswered reply from ${lastReplyAge}`,
           touchLabel: null,
-          lane: "in_market",
+          lane: LANE,
         },
       ],
-      lane: "in_market",
+      lane: LANE,
       ageDays,
       hold: false,
       holdReason: null,
       recommendAdverse: false,
-      inputs: { ...inputs, rule: "unanswered_inbound", lane: "in_market" },
+      inputs: { ...inputs, rule: "unanswered_inbound" },
     };
   }
 
-  switch (lane) {
-    case "unresponsive":
-      return planUnresponsive(contact, outreachHistory, ctx, {
-        ageDays,
-        unanswered,
-        sinceLastTouch,
-        inputs,
-      });
-    case "blocked":
-      return planBlocked(contact, ctx, { ageDays, sinceLastTouch, inputs });
-    case "in_market":
-    default:
-      return planInMarket(contact, outreachHistory, ctx, { ageDays, saturday, inputs });
-  }
+  return planBlocked(contact, ctx, { ageDays, sinceLastTouch, inputs });
 }
 
 function todaysLog(history: OutreachLogEntry[], ctx: CadenceContext): OutreachLogEntry[] {
@@ -402,7 +304,7 @@ function planBlocked(
   }
 
   // A meaningful interval has passed. One touch, and it must speak to the
-  // blocker — the drafting prompt receives the blocker and its evidence.
+  // blocker, which the card names alongside its evidence.
   const blockerLabel = state?.blocker && state.blocker !== "none"
     ? state.blocker.replace(/_/g, " ")
     : "unknown blocker";
@@ -424,188 +326,6 @@ function planBlocked(
     holdReason: null,
     recommendAdverse: false,
     inputs: { ...inputs, rule: "blocked_interval_elapsed" },
-  };
-}
-
-/**
- * Unresponsive lane.
- *
- * Very low frequency with channel rotation, and a hard stop: past the
- * configured number of consecutive unanswered messages the lead is surfaced
- * as a candidate for Adverse rather than dripped at forever.
- */
-function planUnresponsive(
-  contact: Contact,
-  history: OutreachLogEntry[],
-  ctx: CadenceContext,
-  meta: {
-    ageDays: number;
-    unanswered: number;
-    sinceLastTouch: number | null;
-    inputs: Record<string, unknown>;
-  }
-): LeadPlan {
-  const { ageDays, unanswered, sinceLastTouch, inputs } = meta;
-
-  if (unanswered >= ctx.config.unresponsive_max_consecutive) {
-    return {
-      actions: [],
-      lane: "unresponsive",
-      ageDays,
-      hold: true,
-      holdReason: `${unanswered} messages with no reply — recommend moving to Adverse`,
-      recommendAdverse: true,
-      inputs: { ...inputs, rule: "unresponsive_hard_stop" },
-    };
-  }
-
-  // Wider spacing than the blocked lane: they are not refusing, they are not
-  // reading.
-  const interval = ctx.config.blocked_min_days_between_touches;
-  if (sinceLastTouch !== null && sinceLastTouch < interval) {
-    return {
-      actions: [],
-      lane: "unresponsive",
-      ageDays,
-      hold: true,
-      holdReason: `Last touched ${sinceLastTouch} days ago; waiting ${interval}`,
-      recommendAdverse: false,
-      inputs: { ...inputs, rule: "unresponsive_interval_not_elapsed" },
-    };
-  }
-
-  // Rotate channel on every attempt — the previous one demonstrably failed.
-  const lastChannel = getLastChannelUsed(history);
-  return {
-    actions: [
-      {
-        contactId: contact.id,
-        actionType: alternateChannel(lastChannel),
-        priorityScore: 30,
-        priorityReason: `No reply to last ${unanswered} — trying ${alternateChannel(lastChannel)}`,
-        touchLabel: `Attempt ${unanswered + 1} of ${ctx.config.unresponsive_max_consecutive}`,
-        lane: "unresponsive",
-      },
-    ],
-    lane: "unresponsive",
-    ageDays,
-    hold: false,
-    holdReason: null,
-    recommendAdverse: false,
-    inputs: { ...inputs, rule: "unresponsive_rotate" },
-  };
-}
-
-/** In-market lane — the existing aggressive rhythm, which was roughly right. */
-function planInMarket(
-  contact: Contact,
-  outreachHistory: OutreachLogEntry[],
-  ctx: CadenceContext,
-  meta: { ageDays: number; saturday: boolean; inputs: Record<string, unknown> }
-): LeadPlan {
-  const { ageDays, saturday, inputs } = meta;
-  const cadence = getCadenceTarget(ageDays);
-  const todayLog = todaysLog(outreachHistory, ctx);
-
-  const todayMessages = todayLog.filter(
-    (e) => e.action_type !== "call" && e.status !== "skipped"
-  );
-  const todayCalls = todayLog.filter(
-    (e) => e.action_type === "call" && e.status !== "skipped"
-  );
-
-  let targetMessages = shouldActToday(cadence.messagesTouches, ageDays);
-  let targetCalls = shouldActToday(cadence.calls, ageDays);
-
-  if (saturday) {
-    targetMessages = Math.min(targetMessages, ctx.config.saturday_max_messages);
-    targetCalls = ctx.config.saturday_calls ? targetCalls : 0;
-  }
-
-  const remainingMessages = Math.max(0, targetMessages - todayMessages.length);
-  const remainingCalls = Math.max(0, targetCalls - todayCalls.length);
-  const isOverdue = checkOverdue(ageDays, outreachHistory, ctx);
-
-  let baseScore = 100;
-  if (ageDays === 0) baseScore = 500;
-  else if (ageDays <= 3) baseScore = 300;
-  else if (ageDays <= 7) baseScore = 200;
-  else if (ageDays <= 14) baseScore = 100;
-  else baseScore = 50;
-  if (isOverdue) baseScore += 400;
-
-  const actions: QueueAction[] = [];
-  const lastChannel = getLastChannelUsed(todayLog);
-  const totalTouches = remainingMessages + remainingCalls;
-
-  for (let i = 0; i < remainingMessages; i++) {
-    const hinted = cadence.channelHint[todayMessages.length + i];
-    const channel: "sms" | "email" =
-      hinted ??
-      alternateChannel(
-        i === 0
-          ? lastChannel
-          : actions[actions.length - 1]?.actionType === "sms"
-            ? "sms"
-            : "email"
-      );
-
-    const reason = isOverdue
-      ? "Overdue — missed yesterday's cadence"
-      : ageDays === 0
-        ? "Day 1 — speed to lead"
-        : ageDays <= 3
-          ? `Day ${ageDays + 1} — early cadence`
-          : "Scheduled touch";
-
-    const touchNum = todayMessages.length + i + 1;
-    actions.push({
-      contactId: contact.id,
-      actionType: channel,
-      priorityScore: baseScore - i,
-      priorityReason: reason,
-      touchLabel:
-        totalTouches > 1 ? `Touch ${touchNum} of ${targetMessages + targetCalls}` : null,
-      lane: "in_market",
-    });
-  }
-
-  for (let i = 0; i < remainingCalls; i++) {
-    const reason =
-      ageDays === 0
-        ? "Day 1 — intro call"
-        : ageDays <= 3
-          ? `Day ${ageDays + 1} — follow-up call`
-          : "Scheduled call";
-
-    const touchNum =
-      todayMessages.length + remainingMessages + todayCalls.length + i + 1;
-    actions.push({
-      contactId: contact.id,
-      actionType: "call",
-      priorityScore: baseScore + 25 - i,
-      priorityReason: reason,
-      touchLabel:
-        totalTouches > 1 ? `Touch ${touchNum} of ${targetMessages + targetCalls}` : null,
-      lane: "in_market",
-    });
-  }
-
-  return {
-    actions,
-    lane: "in_market",
-    ageDays,
-    hold: actions.length === 0,
-    holdReason: actions.length === 0 ? "No touch due today under the in-market cadence" : null,
-    recommendAdverse: false,
-    inputs: {
-      ...inputs,
-      rule: isOverdue ? "in_market_overdue" : "in_market_scheduled",
-      target_messages: targetMessages,
-      target_calls: targetCalls,
-      base_score: baseScore,
-      is_overdue: isOverdue,
-    },
   };
 }
 

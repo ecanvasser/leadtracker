@@ -2,12 +2,10 @@ import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
 import { redirect } from "next/navigation";
 import { TelegramSettings } from "@/components/settings/telegram-settings";
-import { VoiceProfileSettings } from "@/components/settings/voice-profile-settings";
 import {
   GeneralSettings,
   type UserSettings,
 } from "@/components/settings/general-settings";
-import type { VoiceProfile } from "@/lib/ai/voice-profile-types";
 import { resolveCadenceConfig } from "@/lib/cadence/config";
 import { modelFor } from "@/lib/ai/models";
 import { localDateFor } from "@/lib/time";
@@ -77,15 +75,9 @@ export default async function SettingsPage() {
         initial={general}
         models={{
           analysis: modelFor("analysis"),
-          draft: modelFor("draft"),
           extract: modelFor("extract"),
         }}
         todaySpend={{ inputTokens, outputTokens, calls }}
-      />
-
-      <VoiceProfileSettings
-        initialProfile={(settings?.voice_profile as VoiceProfile | null) ?? null}
-        initialGeneratedAt={settings?.voice_profile_generated_at ?? null}
       />
 
       <TelegramSettings userId={userId} initialLink={link} />

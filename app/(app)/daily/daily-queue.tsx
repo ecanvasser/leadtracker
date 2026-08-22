@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { toast } from "sonner";
@@ -203,9 +202,6 @@ export function DailyQueue() {
   const [undoable, setUndoable] = useState<PendingAction | null>(null);
   const pendingRef = useRef<PendingAction | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [reviseOpen, setReviseOpen] = useState(false);
-  const [reviseInstruction, setReviseInstruction] = useState("");
-  const [revising, setRevising] = useState(false);
   const router = useRouter();
 
   const loadQueue = useCallback(async () => {
@@ -507,10 +503,6 @@ export function DailyQueue() {
           e.preventDefault();
           if (currentItem.action_type !== "call") setIsEditing(true);
           break;
-        case "r":
-          e.preventDefault();
-          if (currentItem.action_type !== "call") setReviseOpen(true);
-          break;
         case "k":
           e.preventDefault();
           handleAction("skip");
@@ -543,52 +535,6 @@ export function DailyQueue() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });
-
-  /** Sends a redraft instruction through the shared, validated revise path. */
-  async function handleRevise() {
-    if (!currentItem || !reviseInstruction.trim()) return;
-    setRevising(true);
-    try {
-      const res = await fetch("/api/daily-queue/revise", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          queueItemId: currentItem.id,
-          instruction: reviseInstruction.trim(),
-        }),
-      });
-      const data = await res.json();
-
-      if (data.error) {
-        toast.error(data.error);
-      } else {
-        const updated = {
-          ...currentItem,
-          draft_message: data.body,
-          email_subject: data.subject ?? currentItem.email_subject,
-        };
-        setCurrentItem(updated);
-        setQueue((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
-        setEditedMessage(data.body);
-        setReviseOpen(false);
-        setReviseInstruction("");
-
-        if (data.validated) {
-          toast.success("Redrafted");
-        } else {
-          // Shown rather than withheld, but flagged — the broker asked for
-          // this specific change and should see the result either way.
-          toast.warning("Redrafted, but it broke a rule", {
-            description: data.violations?.[0] ?? "Check it before sending",
-            duration: 8000,
-          });
-        }
-      }
-    } catch {
-      toast.error("Redraft failed");
-    }
-    setRevising(false);
-  }
 
   /** Moves through pending cards without actioning them. */
   function stepCard(delta: number) {
@@ -727,7 +673,6 @@ export function DailyQueue() {
               [
                 ["S", "Send"],
                 ["E", "Edit"],
-                ["R", "Redraft"],
                 ["K", "Skip"],
                 ["Z", "Snooze"],
                 ["H", "Hold 2 weeks"],
@@ -982,35 +927,6 @@ export function DailyQueue() {
                   </div>
                 )}
 
-                {/* Redraft — a plain instruction, run through the same
-                    constraints as the first draft. */}
-                {reviseOpen && currentItem.action_type !== "call" && (
-                  <div className="flex gap-2 pt-1">
-                    <Input
-                      autoFocus
-                      value={reviseInstruction}
-                      placeholder='e.g. "shorter", "mention the credit timeline"'
-                      onChange={(e) => setReviseInstruction(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") handleRevise();
-                        if (e.key === "Escape") setReviseOpen(false);
-                      }}
-                      className="text-sm"
-                    />
-                    <Button
-                      size="sm"
-                      onClick={handleRevise}
-                      disabled={revising || !reviseInstruction.trim()}
-                    >
-                      {revising ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        "Redraft"
-                      )}
-                    </Button>
-                  </div>
-                )}
-
                 <div className="flex gap-2 pt-1">
                   {currentItem.action_type === "call" ? (
                     <Button
@@ -1063,18 +979,6 @@ export function DailyQueue() {
                     <Clock className="h-4 w-4 mr-1.5" />
                     Snooze
                   </Button>
-
-                  {currentItem.action_type !== "call" && (
-                    <Button
-                      variant="outline"
-                      onClick={() => setReviseOpen((v) => !v)}
-                     
-                      title="Redraft (R)"
-                    >
-                      <RefreshCw className="h-4 w-4 mr-1.5" />
-                      Redraft
-                    </Button>
-                  )}
 
                   {currentItem.action_type !== "call" && (
                     <Button

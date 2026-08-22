@@ -15,7 +15,9 @@ export type ModelRole = "analysis" | "draft" | "extract";
  *
  * - analysis: lead-state classification and voice-profile extraction. Judgment
  *   matters most and volume is low (a handful of calls per lead per week).
- * - draft:    message drafting and redrafts. The high-volume path.
+ * - draft:    unused since the Phase 7 retirement removed drafting. The role
+ *              and its env var are kept so the routing table stays a complete
+ *              description of the tiers rather than growing a hole.
  * - extract:  call-time and commitment detection. Pattern matching, not
  *   judgment, and only reached when a regex/date parse is ambiguous.
  */

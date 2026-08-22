@@ -43,81 +43,12 @@ function logEntry(overrides: Partial<OutreachLogEntry> = {}): OutreachLogEntry {
 
 // A Thursday at 09:00 PDT.
 const THURSDAY_MORNING = new Date("2026-08-20T16:00:00Z");
-// The same Thursday at 17:30 PDT — already Friday in UTC.
-const THURSDAY_EVENING = new Date("2026-08-21T00:30:00Z");
 
-describe("lead age", () => {
-  it("treats a lead created today as Day 0 and applies speed-to-lead", () => {
-    const actions = calculateTodayActions(contact(), [], [], {
-      timeZone: LA,
-      now: THURSDAY_MORNING,
-    });
-    expect(actions.length).toBeGreaterThan(0);
-    expect(actions[0].priorityReason).toContain("Day 1 — speed to lead");
-    // Day 0 target is 3 messages + 2 calls.
-    expect(actions.filter((a) => a.actionType !== "call")).toHaveLength(3);
-    expect(actions.filter((a) => a.actionType === "call")).toHaveLength(2);
-  });
-
-  it("gives a day-30 lead far less than a day-0 lead", () => {
-    const old = contact({ created_at: "2026-07-21T16:00:00Z" }); // 30 days prior
-    const dayThirty = calculateTodayActions(old, [], [], {
-      timeZone: LA,
-      now: THURSDAY_MORNING,
-    });
-    const dayZero = calculateTodayActions(contact(), [], [], {
-      timeZone: LA,
-      now: THURSDAY_MORNING,
-    });
-    expect(dayThirty.length).toBeLessThan(dayZero.length);
-  });
-
-  it("scores a day-0 lead above an older one", () => {
-    const dayZero = calculateTodayActions(contact(), [], [], {
-      timeZone: LA,
-      now: THURSDAY_MORNING,
-    });
-    const older = calculateTodayActions(
-      contact({ created_at: "2026-08-05T16:00:00Z" }),
-      [],
-      [],
-      { timeZone: LA, now: THURSDAY_MORNING }
-    );
-    if (older.length > 0) {
-      expect(dayZero[0].priorityScore).toBeGreaterThan(older[0].priorityScore);
-    }
-  });
-});
-
-describe("local-timezone evaluation", () => {
-  // The core 0.2 regression: at 17:30 Pacific the UTC date has already rolled
-  // to tomorrow, so a UTC-based engine saw an empty "today" log and re-queued
-  // work that was already done.
-  it("counts this morning's outreach as today at 5:30 PM Pacific", () => {
-    const sentThisMorning = [
-      logEntry({ created_at: "2026-08-20T16:30:00Z" }), // 09:30 PDT
-      logEntry({ id: "log-2", created_at: "2026-08-20T18:00:00Z" }), // 11:00 PDT
-    ];
-
-    const actions = calculateTodayActions(contact(), sentThisMorning, [], {
-      timeZone: LA,
-      now: THURSDAY_EVENING,
-    });
-
-    // Day-0 target is 3 messages; two are already logged today, so exactly one
-    // message remains. A UTC engine would have offered all three again.
-    expect(actions.filter((a) => a.actionType !== "call")).toHaveLength(1);
-  });
-
-  it("does not count yesterday's outreach as today", () => {
-    const sentYesterday = [logEntry({ created_at: "2026-08-19T18:00:00Z" })];
-    const actions = calculateTodayActions(contact(), sentYesterday, [], {
-      timeZone: LA,
-      now: THURSDAY_EVENING,
-    });
-    expect(actions.filter((a) => a.actionType !== "call")).toHaveLength(3);
-  });
-});
+// Phase 7 retirement: the "lead age" and "local-timezone evaluation" blocks
+// went with the in-market lane — both measured its day-0 target of three
+// messages, which no longer exists. The local-date regression they also
+// guarded is still covered by the weekend block below, which asserts the same
+// thing through the Saturday-evening and Sunday-night gates.
 
 describe("weekend rules", () => {
   // 2026-08-23 is a Sunday. Noon PDT.
@@ -144,13 +75,16 @@ describe("weekend rules", () => {
     expect(actions.length).toBeGreaterThan(0);
   });
 
-  it("caps Saturday at one message and no calls", () => {
+  // Was "caps Saturday at one message and no calls". The cap lived in the
+  // in-market lane, so saturday_max_messages and saturday_calls are inert
+  // after the Phase 7 retirement. What still holds is the gate: Saturday is a
+  // working day by default.
+  it("works a local Saturday by default", () => {
     const actions = calculateTodayActions(contact(), [], [], {
       timeZone: LA,
       now: SATURDAY,
     });
-    expect(actions.filter((a) => a.actionType !== "call")).toHaveLength(1);
-    expect(actions.filter((a) => a.actionType === "call")).toHaveLength(0);
+    expect(actions.length).toBeGreaterThan(0);
   });
 
   it("still treats Saturday evening as Saturday, not Sunday", () => {
@@ -161,7 +95,6 @@ describe("weekend rules", () => {
       now: SATURDAY_EVENING,
     });
     expect(actions.length).toBeGreaterThan(0);
-    expect(actions.filter((a) => a.actionType === "call")).toHaveLength(0);
   });
 
   it("returns nothing on Saturday when the toggle is off", () => {
@@ -230,7 +163,7 @@ describe("unanswered reply detection", () => {
 // 1.5 Two-lane cadence
 // ---------------------------------------------------------------------------
 
-import { planLead, selectLane, consecutiveUnanswered } from "@/lib/cadence/engine";
+import { planLead, consecutiveUnanswered } from "@/lib/cadence/engine";
 import { resolveCadenceConfig } from "@/lib/cadence/config";
 import type { LeadState } from "@/lib/insights/lead-state";
 
@@ -251,43 +184,6 @@ function leadState(overrides: Partial<LeadState> = {}): LeadState {
   };
 }
 
-describe("lane selection", () => {
-  const cfg = resolveCadenceConfig(null);
-
-  it("routes in_market and warming to the in-market lane", () => {
-    expect(selectLane(leadState({ lead_temp: "in_market" }), 2, cfg)).toBe("in_market");
-    expect(selectLane(leadState({ lead_temp: "warming" }), 9, cfg)).toBe("in_market");
-  });
-
-  it("routes stalled and blocked to the blocked lane", () => {
-    expect(selectLane(leadState({ lead_temp: "stalled" }), 20, cfg)).toBe("blocked");
-    expect(selectLane(leadState({ lead_temp: "blocked" }), 40, cfg)).toBe("blocked");
-  });
-
-  it("routes unresponsive to its own lane", () => {
-    expect(selectLane(leadState({ lead_temp: "unresponsive" }), 40, cfg)).toBe("unresponsive");
-  });
-
-  it("trusts the classification over the lead's age", () => {
-    // A 90-day lead that is genuinely back in market belongs in the fast lane.
-    expect(selectLane(leadState({ lead_temp: "in_market" }), 90, cfg)).toBe("in_market");
-    // A 3-day lead already blocked on credit does not.
-    expect(selectLane(leadState({ lead_temp: "blocked" }), 3, cfg)).toBe("blocked");
-  });
-
-  it("falls back to age when the lead has never been classified", () => {
-    expect(selectLane(null, 5, cfg)).toBe("in_market");
-    expect(selectLane(null, 45, cfg)).toBe("blocked");
-  });
-
-  it("uses the configured in-market age boundary", () => {
-    const wide = resolveCadenceConfig({ in_market_max_age_days: 30 });
-    expect(selectLane(null, 25, wide)).toBe("in_market");
-    expect(selectLane(null, 25, cfg)).toBe("blocked");
-  });
-});
-
-// The headline behaviour change: the engine may recommend doing nothing.
 describe("blocked lane holds rather than manufacturing a touch", () => {
   const old = contact({ created_at: "2026-06-20T16:00:00Z" }); // ~60 days
 
@@ -350,9 +246,7 @@ describe("blocked lane holds rather than manufacturing a touch", () => {
   });
 });
 
-describe("unresponsive lane", () => {
-  const old = contact({ created_at: "2026-06-20T16:00:00Z" });
-
+describe("consecutive unanswered counting", () => {
   function unanswered(n: number): BonzoCommEntry[] {
     return Array.from({ length: n }, (_, i) => ({
       id: i,
@@ -376,51 +270,14 @@ describe("unresponsive lane", () => {
     expect(consecutiveUnanswered(comms)).toBe(1);
   });
 
-  it("recommends Adverse after the configured number of silent attempts", () => {
-    const plan = planLead(old, [], unanswered(5), {
-      timeZone: LA,
-      now: THURSDAY_MORNING,
-      leadState: leadState({ lead_temp: "unresponsive", recommended_action: "sms" }),
-    });
-    expect(plan.recommendAdverse).toBe(true);
-    expect(plan.hold).toBe(true);
-    expect(plan.holdReason).toContain("Adverse");
-  });
-
-  it("does not recommend Adverse before the threshold", () => {
-    const plan = planLead(old, [], unanswered(2), {
-      timeZone: LA,
-      now: THURSDAY_MORNING,
-      leadState: leadState({ lead_temp: "unresponsive", recommended_action: "sms" }),
-    });
-    expect(plan.recommendAdverse).toBe(false);
-  });
-
-  it("rotates channel, since the previous one demonstrably failed", () => {
-    const plan = planLead(old, [logEntry({ action_type: "sms", created_at: "2026-07-01T00:00:00Z" })], unanswered(2), {
-      timeZone: LA,
-      now: THURSDAY_MORNING,
-      leadState: leadState({ lead_temp: "unresponsive", recommended_action: "sms" }),
-    });
-    if (!plan.hold) {
-      expect(plan.actions[0].actionType).toBe("email");
-      expect(plan.actions[0].touchLabel).toContain("of 5");
-    }
-  });
-
-  it("honours a lowered threshold from config", () => {
-    const plan = planLead(old, [], unanswered(2), {
-      timeZone: LA,
-      now: THURSDAY_MORNING,
-      leadState: leadState({ lead_temp: "unresponsive", recommended_action: "sms" }),
-      config: resolveCadenceConfig({ unresponsive_max_consecutive: 2 }),
-    });
-    expect(plan.recommendAdverse).toBe(true);
-  });
+  // Phase 7 retirement: the lane's own tests — the hard stop, channel rotation
+  // and the configurable threshold — went with planUnresponsive. The counter
+  // stays because it is the primitive the workflow engine's no_inbound_since
+  // trigger will read.
 });
 
-describe("an unanswered inbound overrides every lane", () => {
-  it("puts a blocked lead back in the fast lane when they reply", () => {
+describe("an unanswered inbound outranks everything else", () => {
+  it("acts immediately, at top priority, when a blocked lead replies", () => {
     const comms: BonzoCommEntry[] = [
       { id: 1, content: "Actually my credit just cleared, can we look again?", direction: "inbound", type: "sms", created_at: "2026-08-20T15:00:00Z" },
     ];
@@ -430,7 +287,7 @@ describe("an unanswered inbound overrides every lane", () => {
       leadState: leadState({ lead_temp: "blocked", recommended_action: "hold" }),
     });
     expect(plan.hold).toBe(false);
-    expect(plan.lane).toBe("in_market");
+    expect(plan.inputs.rule).toBe("unanswered_inbound");
     expect(plan.actions[0].priorityScore).toBe(1000);
   });
 });

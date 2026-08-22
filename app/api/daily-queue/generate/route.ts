@@ -1,31 +1,47 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
-import { planLead, type LeadPlan, type QueueAction, type OutreachLogEntry } from "@/lib/cadence/engine";
+import {
+  planLead,
+  type LeadPlan,
+  type QueueAction,
+  type OutreachLogEntry,
+  type BonzoCommEntry,
+} from "@/lib/cadence/engine";
 import { resolveCadenceConfig, type CadenceConfig } from "@/lib/cadence/config";
 import type { LeadState } from "@/lib/insights/lead-state";
 import { Contact, QUEUE_ELIGIBLE_STAGES } from "@/types/db";
 import { getUserTimezone, localDate } from "@/lib/time";
-import { modelFor } from "@/lib/ai/models";
-import type { VoiceProfile } from "@/lib/ai/voice-profile-types";
-import {
-  DRAFT_PROMPT_VERSION,
-  generateDrafts,
-  type DraftResult,
-  type DraftSettings,
-  type InsightsCache,
-  type PendingAction,
-} from "@/lib/ai/draft";
+
+/**
+ * Phase 7 retirement: drafting is gone. The queue still decides who to work
+ * and why; it no longer writes the message. These two shapes travelled with
+ * the drafting module, so they live here now — the only place left that reads
+ * the insights cache to build a queue row.
+ */
+export interface InsightsCache {
+  contact_id: string;
+  bonzo_prospect_data: Record<string, unknown>;
+  bonzo_communication: BonzoCommEntry[];
+  ai_analysis: Record<string, unknown>;
+  lead_state: LeadState | null;
+}
+
+export interface PendingAction {
+  contact: Contact;
+  action: QueueAction;
+  plan: LeadPlan;
+  cache: InsightsCache;
+}
 
 function buildDecisionTrace(input: {
   action: QueueAction;
   plan: LeadPlan;
-  draft: DraftResult | undefined;
   leadState: LeadState | null;
   cadenceConfig: CadenceConfig;
   timeZone: string;
 }): Record<string, unknown> {
-  const { action, plan, draft, leadState, cadenceConfig, timeZone } = input;
+  const { action, plan, leadState, cadenceConfig, timeZone } = input;
 
   return {
     // Which lane and which rule inside it.
@@ -63,22 +79,6 @@ function buildDecisionTrace(input: {
     cadence_config: cadenceConfig,
     timezone: timeZone,
 
-    // Drafting: model, prompt version, validation outcome and spend.
-    drafting: draft
-      ? {
-          model: draft.usage?.model ?? modelFor("draft"),
-          prompt_version: DRAFT_PROMPT_VERSION,
-          temperature: draft.usage?.temperature ?? null,
-          attempts: draft.attempts ?? null,
-          validated: draft.validated ?? null,
-          violations: draft.violations ?? [],
-          input_tokens: draft.usage?.input_tokens ?? null,
-          output_tokens: draft.usage?.output_tokens ?? null,
-          cache_read_input_tokens: draft.usage?.cache_read_input_tokens ?? null,
-          latency_ms: draft.usage?.latency_ms ?? null,
-        }
-      : { model: null, prompt_version: DRAFT_PROMPT_VERSION, note: "no draft produced" },
-
     generated_at: new Date().toISOString(),
   };
 }
@@ -99,24 +99,15 @@ export async function POST(request: NextRequest) {
   const timeZone = await getUserTimezone(userId, serviceClient);
   const todayStr = localDate(new Date(), timeZone);
 
-  // Broker identity and voice profile drive both the prompt and the validator,
-  // so they are read once and threaded through drafting.
   const { data: userSettings } = await serviceClient
     .from("user_settings")
-    .select("broker_display_name, broker_company, voice_profile, cadence_config")
+    .select("cadence_config")
     .eq("user_id", userId)
     .maybeSingle();
 
   const cadenceConfig: CadenceConfig = resolveCadenceConfig(
     userSettings?.cadence_config
   );
-
-  const draftSettings: DraftSettings = {
-    brokerName: userSettings?.broker_display_name ?? "Eddie Canvasser",
-    brokerCompany: userSettings?.broker_company ?? "E Mortgage Capital",
-    voiceProfile: (userSettings?.voice_profile as VoiceProfile | null) ?? null,
-    timeZone,
-  };
 
   const { data: existingQueue } = await serviceClient
     .from("daily_queue")
@@ -303,16 +294,6 @@ export async function POST(request: NextRequest) {
     return new Date(a.contact.created_at).getTime() - new Date(b.contact.created_at).getTime();
   });
 
-  const drafts = await generateDrafts(allActions, draftSettings);
-
-  const draftMap = new Map<number, DraftResult>();
-  for (const d of drafts) {
-    if (typeof d.action_index !== "number") continue;
-    // First write wins, so a duplicated index from the model cannot overwrite
-    // a draft that was already matched to its action.
-    if (!draftMap.has(d.action_index)) draftMap.set(d.action_index, d);
-  }
-
   // Only pending rows are replaced. Actioned rows are left exactly as they are.
   await serviceClient
     .from("daily_queue")
@@ -326,12 +307,6 @@ export async function POST(request: NextRequest) {
   const rankOffset = actionedRows.length;
 
   const queueRows = allActions.map(({ contact, action, plan, cache }, idx) => {
-    const draft = draftMap.get(idx);
-    // Subject stays in its own column. Packing it into the body as
-    // "Subject: X\n\nBody" leaked that literal line into any unedited send,
-    // and Bonzo's email endpoint takes subject and message separately anyway.
-    const draftMessage = draft?.draft_message ?? null;
-
     return {
       user_id: userId,
       contact_id: contact.id,
@@ -339,17 +314,15 @@ export async function POST(request: NextRequest) {
       priority_rank: rankOffset + idx + 1,
       priority_reason: action.priorityReason,
       action_type: action.actionType,
-      draft_message: draftMessage,
-      email_subject:
-        action.actionType === "email" ? draft?.email_subject ?? null : null,
-      call_talking_points: draft?.call_talking_points ?? null,
+      // draft_message, email_subject and call_talking_points stay in the
+      // schema (they hold historical rows) but are no longer written. Phase 7
+      // replaces the draft with suggested_angle from the classifier.
       status: "pending",
       lane: action.lane,
       touch_label: action.touchLabel,
       decision_trace: buildDecisionTrace({
         action,
         plan,
-        draft,
         leadState: cache.lead_state,
         cadenceConfig,
         timeZone,

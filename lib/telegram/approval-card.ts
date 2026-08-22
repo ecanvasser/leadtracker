@@ -17,8 +17,6 @@ import type { LeadState } from "@/lib/insights/lead-state";
 /** Telegram caps callback_data at 64 bytes, so action codes are short. */
 export const CB = {
   send: "qs",
-  edit: "qe",
-  redraft: "qr",
   skip: "qk",
   snoozeMenu: "qz",
   snoozeApply: "qza",
@@ -49,7 +47,11 @@ export interface ApprovalCardInput {
   /** Most recent inbound message, shown verbatim. */
   lastInbound: { content: string; created_at: string } | null;
   bonzoProspectId: number | null;
-  /** Set when the draft failed validation and is being shown anyway. */
+  /**
+   * Phase 7 retirement: nothing sets this any more — the validator that
+   * produced it is gone. Kept on the card input so historical daily_queue rows
+   * that still carry a stored draft render the way they always did.
+   */
   unvalidatedReasons?: string[];
 }
 
@@ -174,8 +176,10 @@ export function approvalKeyboard(input: {
     kb.text("✅ Done", `${CB.send}:${id}`).text("⏰ Snooze", `${CB.snoozeMenu}:${id}`);
     kb.row().text("⏭ Skip", `${CB.skip}:${id}`);
   } else {
-    kb.text("✅ Send", `${CB.send}:${id}`).text("✏️ Edit", `${CB.edit}:${id}`);
-    kb.row().text("🔄 Redraft", `${CB.redraft}:${id}`).text("⏰ Snooze", `${CB.snoozeMenu}:${id}`);
+    // Phase 7 retirement: Edit and Redraft are gone with the drafting
+    // subsystem. Section 5 replaces Send outright with Hand off / Mark
+    // adverse; until then a message card offers only Send, Snooze and Skip.
+    kb.text("✅ Send", `${CB.send}:${id}`).text("⏰ Snooze", `${CB.snoozeMenu}:${id}`);
     kb.row().text("⏭ Skip", `${CB.skip}:${id}`);
   }
 

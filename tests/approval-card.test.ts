@@ -154,7 +154,7 @@ describe("approvalKeyboard", () => {
       .map((b) => ("callback_data" in b ? b.callback_data : "url"));
   }
 
-  it("offers send, edit, redraft, snooze and skip for a message", () => {
+  it("offers send, snooze and skip for a message", () => {
     const kb = approvalKeyboard({
       queueItemId: "abc",
       actionType: "sms",
@@ -162,13 +162,15 @@ describe("approvalKeyboard", () => {
     });
     const all = codes(kb).join(" ");
     expect(all).toContain("qs:abc");
-    expect(all).toContain("qe:abc");
-    expect(all).toContain("qr:abc");
     expect(all).toContain("qz:abc");
     expect(all).toContain("qk:abc");
+    // Phase 7 retirement: Edit and Redraft are gone with the drafting
+    // subsystem, so their callback codes must not come back by accident.
+    expect(all).not.toContain("qe:");
+    expect(all).not.toContain("qr:");
   });
 
-  it("offers no send or redraft for a call, only done, snooze and skip", () => {
+  it("offers only done, snooze and skip for a call", () => {
     const kb = approvalKeyboard({
       queueItemId: "abc",
       actionType: "call",

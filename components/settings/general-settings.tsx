@@ -32,7 +32,7 @@ export interface UserSettings {
 interface Props {
   initial: UserSettings;
   /** Model routing is env-configured, so it is shown read-only. */
-  models: { analysis: string; draft: string; extract: string };
+  models: { analysis: string; extract: string };
   todaySpend: { inputTokens: number; outputTokens: number; calls: number };
 }
 
@@ -282,8 +282,7 @@ export function GeneralSettings({ initial, models, todaySpend }: Props) {
         <CardContent className="space-y-4">
           <dl className="text-xs space-y-1.5">
             {[
-              ["Classification & voice profile", models.analysis, "ANTHROPIC_MODEL_ANALYSIS"],
-              ["Drafting & redrafts", models.draft, "ANTHROPIC_MODEL_DRAFT"],
+              ["Classification", models.analysis, "ANTHROPIC_MODEL_ANALYSIS"],
               ["Call-time extraction", models.extract, "ANTHROPIC_MODEL_EXTRACT"],
             ].map(([label, model, env]) => (
               <div key={env} className="flex items-baseline gap-2">

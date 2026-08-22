@@ -18,17 +18,12 @@ import {
   type BonzoCommunication,
   type BonzoProspect,
 } from "@/lib/bonzo/client";
-import { analyzeProspect, type AiAnalysis } from "@/lib/insights/analyze";
+import { analyzeProspect } from "@/lib/insights/analyze";
 import type { Job } from "@/lib/jobs/queue";
-import type { BonzoCommEntry } from "@/lib/cadence/engine";
-import { classifyLeadState, type LeadState } from "@/lib/insights/lead-state";
+import { classifyLeadState } from "@/lib/insights/lead-state";
 import { getUserTimezone, localDate, leadAgeDays } from "@/lib/time";
 import { enqueueJob } from "@/lib/jobs/queue";
 import { scanForCallCommitments, recordProposedCall } from "@/lib/calls/scan";
-import { generateDrafts, type PendingAction } from "@/lib/ai/draft";
-import { resolveCadenceConfig } from "@/lib/cadence/config";
-import { planLead } from "@/lib/cadence/engine";
-import type { Contact } from "@/types/db";
 
 export interface HandlerResult {
   /** Short line recorded in the drain response for observability. */
@@ -178,21 +173,6 @@ export const refreshCache: JobHandler = async (supabase, job) => {
     );
   }
 
-  // Drafts for the contact page come from the same path the queue uses, so
-  // both surfaces show the same text under the same constraints. Previously
-  // analyze.ts produced its own, unvalidated.
-  const draftMessages = await draftsForContactPage({
-    supabase,
-    contact: contact as unknown as Contact,
-    communications,
-    prospect: resolved,
-    leadState: classification?.state ?? null,
-    timeZone,
-  }).catch((e) => {
-    console.error(`[jobs/refresh_cache] drafting failed for ${contactId}:`, e);
-    return [] as AiAnalysis["draft_messages"];
-  });
-
   // An inbound reply is the highest-value signal in the system. It is tracked
   // separately from last_message_at because an outbound send moves that
   // watermark, and a reply arriving afterwards would otherwise be missed.
@@ -222,7 +202,10 @@ export const refreshCache: JobHandler = async (supabase, job) => {
       user_id: contact.user_id,
       bonzo_prospect_data: resolved,
       bonzo_communication: communications,
-      ai_analysis: { ...aiAnalysis, draft_messages: draftMessages },
+      // Phase 7 retirement: draft_messages is no longer produced. The key is
+      // left off rather than written empty so historical rows keep whatever
+      // they already had.
+      ai_analysis: aiAnalysis,
       ...(classification
         ? {
             lead_state: classification.state,
@@ -306,78 +289,17 @@ export const refreshCache: JobHandler = async (supabase, job) => {
 
 
 /**
- * Produces the contact page's suggested messages through the shared drafting
- * path.
+ * draft_reply — a prospect replied, so surface them and push the card.
  *
- * Runs the cadence engine first so the draft answers a real recommended
- * action rather than a generic "write something". If the engine says hold,
- * there is nothing to draft — and showing nothing is the correct outcome,
- * not a failure.
- */
-async function draftsForContactPage(input: {
-  supabase: SupabaseClient;
-  contact: Contact;
-  communications: BonzoCommunication[];
-  prospect: BonzoProspect;
-  leadState: LeadState | null;
-  timeZone: string;
-}): Promise<AiAnalysis["draft_messages"]> {
-  const { supabase, contact, communications, prospect, leadState, timeZone } = input;
-
-  const { data: settings } = await supabase
-    .from("user_settings")
-    .select("broker_display_name, broker_company, voice_profile, cadence_config")
-    .eq("user_id", contact.user_id)
-    .maybeSingle();
-
-  const plan = planLead(contact, [], communications, {
-    timeZone,
-    config: resolveCadenceConfig(settings?.cadence_config),
-    leadState,
-  });
-
-  // The engine chose to stay quiet. Respect that here too — manufacturing a
-  // draft for the contact page would reintroduce exactly the behaviour the
-  // hold rule exists to stop.
-  const messageActions = plan.actions.filter((a) => a.actionType !== "call");
-  if (messageActions.length === 0) return [];
-
-  const pending: PendingAction[] = messageActions.slice(0, 2).map((action) => ({
-    contact,
-    action,
-    plan,
-    cache: {
-      contact_id: contact.id,
-      bonzo_prospect_data: prospect as unknown as Record<string, unknown>,
-      bonzo_communication: communications as unknown as BonzoCommEntry[],
-      ai_analysis: {},
-      lead_state: leadState,
-    },
-  }));
-
-  const drafts = await generateDrafts(pending, {
-    brokerName: settings?.broker_display_name ?? "Eddie Canvasser",
-    brokerCompany: settings?.broker_company ?? "E Mortgage Capital",
-    voiceProfile: settings?.voice_profile ?? null,
-    timeZone,
-  });
-
-  return drafts
-    .filter((d) => d.draft_message)
-    .map((d) => ({
-      channel: d.action_type === "email" ? ("email" as const) : ("sms" as const),
-      ...(d.email_subject ? { subject: d.email_subject } : {}),
-      body: d.draft_message as string,
-    }));
-}
-
-/**
- * draft_reply — a prospect replied, so draft a response and push it.
+ * Phase 7 retirement: the name is now a misnomer and stays only because it is
+ * the job_type value in the queue's check constraint and in pg_cron rows.
+ * Nothing is drafted here any more; the job creates a top-priority queue item
+ * and pushes it. Renaming it means a migration against live queued jobs, which
+ * is Phase 7 work, not retirement work.
  *
- * This is the flow the whole system is built around. A reply should feel
- * near-real-time rather than being batched into tomorrow's queue, so it
- * creates its own queue item at top priority and pushes the card immediately
- * instead of waiting for the morning run.
+ * A reply should still feel near-real-time rather than being batched into
+ * tomorrow's queue, which is why it jumps the rank rather than waiting for the
+ * morning run.
  */
 export const draftReply: JobHandler = async (supabase, job) => {
   const contactId = job.contact_id;
@@ -433,7 +355,7 @@ export const draftReply: JobHandler = async (supabase, job) => {
   const channel: "sms" | "email" =
     (lastInbound.type ?? "").toLowerCase().includes("email") ? "email" : "sms";
 
-  const { data: inserted, error: insertErr } = await supabase
+  const { error: insertErr } = await supabase
     .from("daily_queue")
     .insert({
       user_id: contact.user_id,
@@ -451,16 +373,9 @@ export const draftReply: JobHandler = async (supabase, job) => {
         rule_fired: "inbound_reply_detected",
         replied_at: lastInbound.created_at,
       },
-    })
-    .select("id")
-    .single();
+    });
 
   if (insertErr) throw insertErr;
-
-  // Draft through the shared path so the reply is held to the same
-  // constraints as everything else.
-  const { draftSingleQueueItem } = await import("@/lib/ai/draft-one");
-  const drafted = await draftSingleQueueItem(supabase, contact.user_id, inserted.id);
 
   // pushNextCard, not pushCard: the throttle still applies. The reply item is
   // rank 0, so it is next in line regardless — but three replies arriving
@@ -472,10 +387,11 @@ export const draftReply: JobHandler = async (supabase, job) => {
 
   return {
     summary:
-      `drafted a ${channel} reply for ${contact.name}` +
-      (drafted.validated ? "" : " (unvalidated)") +
+      `queued a ${channel} reply card for ${contact.name}` +
       (push.pushed ? "; pushed" : `; not pushed (${push.reason})`),
-    usedModel: true,
+    // No model call left on this path — the classification that matters for a
+    // reply runs in refresh_cache, behind the hasNewMessages guard.
+    usedModel: false,
   };
 };
 
