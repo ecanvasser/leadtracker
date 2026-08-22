@@ -8,31 +8,21 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { toast } from "sonner";
 import {
   Search,
   RefreshCw,
-  Copy,
   Check,
   Plus,
   ArrowRight,
   ArrowLeft as ArrowLeftIcon,
-  Mail,
   MessageSquare,
   Sparkles,
   Loader2,
   Lightbulb,
   ChevronDown,
   ChevronUp,
-  Pencil,
   ListChecks,
-  MessageCircle,
   Activity,
 } from "lucide-react";
 import type { AiAnalysis } from "@/lib/insights/analyze";
@@ -78,16 +68,12 @@ export function InsightsPanel({
   const [generatedAt, setGeneratedAt] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [addedTodos, setAddedTodos] = useState<Set<string>>(new Set());
-  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
 
   // Enrollment is tracked in state rather than by assigning to the prop.
   // `contact.insights_enabled = true` mutated a value React owns, so the
   // component re-rendered from a prop that no longer matched the server.
   const [enabled, setEnabled] = useState(contact.insights_enabled);
 
-  const [reviseOpen, setReviseOpen] = useState(false);
-  const [reviseInstructions, setReviseInstructions] = useState("");
-  const [revising, setRevising] = useState(false);
 
   useEffect(() => {
     setEnabled(contact.insights_enabled);
@@ -206,45 +192,6 @@ export function InsightsPanel({
       toast.error("Failed to refresh insights");
     }
     setRefreshing(false);
-  }
-
-  async function handleRevise() {
-    if (!reviseInstructions.trim() || !aiAnalysis?.draft_messages) return;
-    setRevising(true);
-
-    try {
-      const res = await fetch("/api/insights/revise", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contactId: contact.id,
-          drafts: aiAnalysis.draft_messages,
-          instructions: reviseInstructions.trim(),
-        }),
-      });
-      const data = await res.json();
-
-      if (data.error) {
-        toast.error(data.error);
-      } else {
-        setAiAnalysis({
-          ...aiAnalysis,
-          draft_messages: data.drafts,
-        });
-        setReviseOpen(false);
-        setReviseInstructions("");
-        toast.success("Drafts revised");
-      }
-    } catch {
-      toast.error("Failed to revise drafts");
-    }
-    setRevising(false);
-  }
-
-  async function handleCopy(text: string, index: number) {
-    await navigator.clipboard.writeText(text);
-    setCopiedIndex(index);
-    setTimeout(() => setCopiedIndex(null), 2000);
   }
 
   async function handleAddTodo(title: string) {
@@ -455,80 +402,15 @@ export function InsightsPanel({
           </Card>
         </section>
 
-        {/* Draft messages */}
-        {aiAnalysis.draft_messages && aiAnalysis.draft_messages.length > 0 && (
-          <section>
-            <div className="flex items-center justify-between mb-2.5">
-              <div className="flex items-center gap-2">
-                <div className="flex items-center justify-center h-5 w-5 rounded bg-green-500/10">
-                  <MessageCircle className="h-3 w-3 text-green-500" />
-                </div>
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                  Draft Messages
-                </h3>
-              </div>
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-7 text-xs"
-                onClick={() => setReviseOpen(true)}
-              >
-                <Pencil className="h-3 w-3 mr-1.5" />
-                Revise
-              </Button>
-            </div>
-            <div className="space-y-2.5">
-              {aiAnalysis.draft_messages.map((draft, i) => (
-                <Card
-                  key={i}
-                  className="transition-all hover:border-border hover:shadow-sm group/draft"
-                >
-                  <CardContent className="pt-4 pb-4">
-                    <div className="flex items-center justify-between mb-2.5">
-                      <Badge
-                        variant="secondary"
-                        className="text-[10px] gap-1"
-                      >
-                        {draft.channel === "email" ? (
-                          <Mail className="h-2.5 w-2.5" />
-                        ) : (
-                          <MessageSquare className="h-2.5 w-2.5" />
-                        )}
-                        {draft.channel.toUpperCase()}
-                      </Badge>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 text-xs opacity-0 group-hover/draft:opacity-100 transition-opacity"
-                        onClick={() => handleCopy(draft.body, i)}
-                      >
-                        {copiedIndex === i ? (
-                          <>
-                            <Check className="h-3 w-3 mr-1 text-green-500" />
-                            Copied
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="h-3 w-3 mr-1" />
-                            Copy
-                          </>
-                        )}
-                      </Button>
-                    </div>
-                    {draft.subject && (
-                      <p className="text-xs font-medium mb-1.5 text-muted-foreground">
-                        Subject: {draft.subject}
-                      </p>
-                    )}
-                    <p className="text-sm whitespace-pre-wrap leading-relaxed">
-                      {draft.body}
-                    </p>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          </section>
-        )}
+        {/*
+          Phase 7 retirement: the Draft Messages section and its Revise button
+          are gone. Nothing produces draft_messages any more, but historical
+          insights_cache rows still carry them — so this section would have
+          shown weeks-old drafts as current, and Revise would have kept making
+          a live Anthropic call through /api/insights/revise, which was a
+          second drafting path that never went through lib/ai. Section 5
+          replaces this with suggested_angle.
+        */}
 
         {/* Suggested to-dos */}
         {aiAnalysis.suggested_todos && aiAnalysis.suggested_todos.length > 0 && (
@@ -596,55 +478,6 @@ export function InsightsPanel({
         </section>
       )}
 
-      {/* Revise drafts dialog */}
-      <Dialog open={reviseOpen} onOpenChange={setReviseOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Revise draft messages</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <p className="text-sm text-muted-foreground">
-              Describe the changes you want. The AI will rewrite the drafts based on your instructions.
-            </p>
-            <textarea
-              value={reviseInstructions}
-              onChange={(e) => setReviseInstructions(e.target.value)}
-              placeholder='e.g. "Make it more casual", "Add urgency about rate lock expiring Friday", "Shorter — 2 sentences max"'
-              rows={4}
-              className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-none"
-            />
-            <div className="flex gap-2 justify-end">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setReviseOpen(false);
-                  setReviseInstructions("");
-                }}
-              >
-                Cancel
-              </Button>
-              <Button
-                size="sm"
-                onClick={handleRevise}
-                disabled={revising || !reviseInstructions.trim()}
-              >
-                {revising ? (
-                  <>
-                    <Loader2 className="h-3 w-3 animate-spin mr-1.5" />
-                    Revising...
-                  </>
-                ) : (
-                  <>
-                    <Pencil className="h-3 w-3 mr-1.5" />
-                    Revise drafts
-                  </>
-                )}
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

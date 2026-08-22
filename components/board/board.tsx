@@ -54,6 +54,23 @@ const FILTER_LABELS: Record<BoardFilter, string> = {
   untouched: "Never contacted",
 };
 
+/**
+ * Columns that start collapsed when there is no stored preference.
+ *
+ * Phase 7 took the board to six pipeline stages plus Todo, which needs 1964px
+ * at min-width — a 1440px laptop hides two columns behind a horizontal scroll.
+ * Collapsing the three post-conversion stages brings it to 1328px, so the
+ * board fits on first load instead of requiring a preference to be set before
+ * it is usable.
+ *
+ * These are the stages Eddie is not working minute to minute: once a deal is
+ * App In it is with the lender. Any of them expands with one click, and the
+ * choice is remembered from then on.
+ */
+const DEFAULT_COLLAPSED: AllStages[] = ["app_in", "submission", "processing"];
+
+const COLLAPSED_STORAGE_KEY = "board:collapsed-columns";
+
 export function Board({
   initialContacts,
   initialTasks,
@@ -70,6 +87,45 @@ export function Board({
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<BoardFilter>("all");
   const [adverseFor, setAdverseFor] = useState<Contact | null>(null);
+  const [collapsed, setCollapsed] = useState<Set<AllStages>>(
+    () => new Set(DEFAULT_COLLAPSED)
+  );
+
+  // Read on mount rather than in the initialiser: localStorage does not exist
+  // during the server render, and reading it in useState would desync the
+  // first client paint from the server HTML.
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(COLLAPSED_STORAGE_KEY);
+      if (raw === null) return;
+      const stored = JSON.parse(raw);
+      if (!Array.isArray(stored)) return;
+      // Filter against ALL_STAGES so a renamed or removed stage in storage
+      // cannot collapse something that no longer exists.
+      setCollapsed(
+        new Set(stored.filter((v): v is AllStages => ALL_STAGES.includes(v)))
+      );
+    } catch {
+      // A corrupt or unavailable store just means the defaults stand.
+    }
+  }, []);
+
+  const toggleCollapsed = useCallback((stage: AllStages) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(stage)) next.delete(stage);
+      else next.add(stage);
+      try {
+        window.localStorage.setItem(
+          COLLAPSED_STORAGE_KEY,
+          JSON.stringify([...next])
+        );
+      } catch {
+        // Persisting is a convenience; the toggle still works this session.
+      }
+      return next;
+    });
+  }, []);
   const supabase = createClient();
   const router = useRouter();
 
@@ -464,6 +520,8 @@ export function Board({
                 onContactClick={(id) => router.push(`/contacts/${id}`)}
                 onEnroll={handleEnroll}
                 onMarkAdverse={setAdverseFor}
+                collapsed={collapsed.has(stage)}
+                onToggleCollapse={toggleCollapsed}
               />
             ))}
 
