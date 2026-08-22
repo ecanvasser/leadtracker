@@ -17,13 +17,24 @@ export type CRM = (typeof CRM_OPTIONS)[number];
 export const PIPELINE_STAGES = [
   "hot_lead",
   "needs_quote",
+  "quoted_follow_up",
   "app_in",
   "submission",
   "processing",
 ] as const;
 export type PipelineStage = (typeof PIPELINE_STAGES)[number];
 
-export const ALL_STAGES = [...PIPELINE_STAGES, "adverse"] as const;
+/**
+ * Every stage a contact can hold, including the two that are not board
+ * columns. 'adverse' and 'funded' are both terminal and both live on their own
+ * page — a dead deal and a closed one are the two things that should leave the
+ * board rather than sit in a column forever.
+ */
+export const ALL_STAGES = [...PIPELINE_STAGES, "adverse", "funded"] as const;
+
+/** Terminal stages: off the board, listed on their own pages. */
+export const TERMINAL_STAGES = ["adverse", "funded"] as const;
+export type TerminalStage = (typeof TERMINAL_STAGES)[number];
 export type AllStages = (typeof ALL_STAGES)[number];
 
 export const ADVERSE_REASONS = [
@@ -39,10 +50,12 @@ export type AdverseReason = (typeof ADVERSE_REASONS)[number];
 export const STAGE_LABELS: Record<AllStages, string> = {
   hot_lead: "Hot Leads",
   needs_quote: "Needs Quote",
+  quoted_follow_up: "Quoted – Follow Up",
   app_in: "App In",
   submission: "Submission",
   processing: "Processing",
   adverse: "Adverse",
+  funded: "Funded",
 };
 
 export const LOAN_TYPE_LABELS: Record<LoanType, string> = {
@@ -69,18 +82,22 @@ export const CRM_LABELS: Record<CRM, string> = {
 export const DEFAULT_STAGE = "hot_lead" as const satisfies AllStages;
 
 /**
- * Stages that receive cadence, drafts, and Telegram pushes. Every automation
- * path must reference this — never a bare stage comparison. Adding a stage
- * without adding it here silently removes those leads from all automation.
+ * Stages that receive automation: classification, the daily queue, workflow
+ * evaluation and Telegram pushes. Every automation path must reference this —
+ * never a bare stage comparison. Adding a stage without adding it here
+ * silently removes those leads from all automation.
  *
- * Phase 6 / D1: 'needs_quote' is deliberately NOT here. A lead parked there is
- * blocked on a number Eddie owes them, and he chose to work those by hand
- * rather than have the engine draft around a quote it cannot see. The cost is
- * that dragging a card into Needs Quote stops its cadence until it is moved
- * back — which is why the import dialog says so out loud rather than letting
- * enrollment sit there inert. Flipping that decision is a one-line change here.
+ * Phase 7: this moved from ['hot_lead'] to ['quoted_follow_up'], and that one
+ * edit is the whole point of the phase. Hot Lead and Needs Quote are hands-on
+ * — Eddie asks the qualifying questions and builds the quotes himself, and
+ * knows what those leads need. The problem worth automating starts after the
+ * pitch, when a lead has heard the number and either moves or goes quiet.
+ *
+ * Consequence to keep in mind: dragging a card out of Quoted – Follow Up stops
+ * its automation. That is deliberate — it is also how a conversion is detected
+ * (D4), since moving a lead to App In is what tells the app to stop chasing.
  */
-export const QUEUE_ELIGIBLE_STAGES = ["hot_lead"] as const;
+export const QUEUE_ELIGIBLE_STAGES = ["quoted_follow_up"] as const;
 export type QueueEligibleStage = (typeof QUEUE_ELIGIBLE_STAGES)[number];
 
 /** Membership test for {@link QUEUE_ELIGIBLE_STAGES}. */

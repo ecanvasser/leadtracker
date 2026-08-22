@@ -5,6 +5,7 @@ import {
   ALL_STAGES,
   PIPELINE_STAGES,
   QUEUE_ELIGIBLE_STAGES,
+  TERMINAL_STAGES,
   STAGE_LABELS,
   LOAN_TYPES,
   LOAN_TYPE_LABELS,
@@ -33,6 +34,24 @@ describe("stage and loan-type tables", () => {
     expect(PIPELINE_STAGES).not.toContain("adverse");
   });
 
+  it("puts Quoted – Follow Up between Needs Quote and App In", () => {
+    expect(PIPELINE_STAGES.indexOf("quoted_follow_up")).toBe(
+      PIPELINE_STAGES.indexOf("needs_quote") + 1
+    );
+    expect(PIPELINE_STAGES.indexOf("quoted_follow_up")).toBeLessThan(
+      PIPELINE_STAGES.indexOf("app_in")
+    );
+  });
+
+  // D1: a funded deal leaves the board rather than sitting in a column that
+  // only ever grows. Same treatment as adverse.
+  it("keeps funded off the board but a real stage", () => {
+    expect(ALL_STAGES).toContain("funded");
+    expect(PIPELINE_STAGES).not.toContain("funded");
+    expect(TERMINAL_STAGES).toEqual(["adverse", "funded"]);
+    for (const t of TERMINAL_STAGES) expect(PIPELINE_STAGES).not.toContain(t);
+  });
+
   it("carries HELOAN and Reverse", () => {
     expect(LOAN_TYPE_LABELS.heloan).toBe("HELOAN");
     expect(LOAN_TYPES).toContain("reverse");
@@ -45,12 +64,31 @@ describe("QUEUE_ELIGIBLE_STAGES", () => {
     for (const s of QUEUE_ELIGIBLE_STAGES) expect(ALL_STAGES).toContain(s);
   });
 
-  it("is what the default stage is", () => {
-    expect(isQueueEligible(DEFAULT_STAGE)).toBe(true);
+  /**
+   * The regression guard for the whole of Phase 7 (spec section 7).
+   *
+   * Automation moved off the stage where Eddie works by hand and onto the one
+   * where a lead has heard the number. If this flips back, every classifier
+   * call, queue card and workflow evaluation is pointed at the wrong leads.
+   */
+  it("names quoted_follow_up, and not the hands-on stages", () => {
+    expect(isQueueEligible("quoted_follow_up")).toBe(true);
+    expect(isQueueEligible("hot_lead")).toBe(false);
+    expect(isQueueEligible("needs_quote")).toBe(false);
   });
 
-  // D1: needs_quote is deliberately out. If this flips, it must flip on
-  // purpose — every automation path reads the same constant.
+  /**
+   * Phase 7 deliberately broke the old invariant that a new lead lands in an
+   * automated stage. It lands in Hot Lead, which is hands-on, and only becomes
+   * the engine's problem once Eddie has pitched and moved it.
+   */
+  it("does not cover the default stage a new lead lands in", () => {
+    expect(DEFAULT_STAGE).toBe("hot_lead");
+    expect(isQueueEligible(DEFAULT_STAGE)).toBe(false);
+  });
+
+  // Every automation path reads the same constant. If this flips, it must flip
+  // on purpose.
   it("accepts exactly the stages it names and rejects every other one", () => {
     for (const s of ALL_STAGES) {
       expect(isQueueEligible(s)).toBe(

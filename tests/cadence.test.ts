@@ -16,7 +16,7 @@ function contact(overrides: Partial<Contact> = {}): Contact {
     name: "Dana Reyes",
     loan_type: "purchase",
     crm: "bonzo",
-    stage: "hot_lead",
+    stage: "quoted_follow_up",
     position: 0,
     adverse_reason: null,
     notes: null,

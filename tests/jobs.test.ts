@@ -196,6 +196,60 @@ describe("refresh_cache cost guard", () => {
     vi.clearAllMocks();
   });
 
+  /**
+   * Phase 7's stage switch, proved at the handler rather than the constant.
+   *
+   * refresh_cache gates on isQueueEligible, so after QUEUE_ELIGIBLE_STAGES
+   * moved to ['quoted_follow_up'] a Hot Lead must fall out of automation
+   * entirely — no Bonzo fetch, no classification, no spend. This is what stops
+   * the engine working leads Eddie handles by hand.
+   */
+  it("does nothing at all for a lead in a hands-on stage", async () => {
+    const analyzeProspect = vi.fn();
+    const getCommunicationHistory = vi.fn();
+
+    vi.doMock("@/lib/insights/analyze", () => ({ analyzeProspect }));
+    vi.doMock("@/lib/bonzo/client", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/bonzo/client")>()),
+      getCommunicationHistory,
+    }));
+
+    const { refreshCache } = await import("@/lib/jobs/handlers");
+
+    const supabase = {
+      from() {
+        return {
+          select: () => ({
+            eq: () => ({
+              maybeSingle: async () => ({
+                data: {
+                  id: "contact-1",
+                  user_id: "user-1",
+                  bonzo_prospect_id: 5150,
+                  bonzo_email: "d@example.com",
+                  insights_enabled: true,
+                  stage: "hot_lead",
+                },
+                error: null,
+              }),
+            }),
+          }),
+        };
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+
+    const result = await refreshCache(supabase, {
+      ...job(),
+      job_type: "refresh_cache",
+    });
+
+    expect(result.usedModel).toBe(false);
+    expect(analyzeProspect).not.toHaveBeenCalled();
+    // Not even the free call — a hands-on lead is not refreshed at all.
+    expect(getCommunicationHistory).not.toHaveBeenCalled();
+  });
+
   it("makes zero model calls when no new messages arrived", async () => {
     const analyzeProspect = vi.fn();
     const getCommunicationHistory = vi.fn(async () => [
@@ -231,7 +285,7 @@ describe("refresh_cache cost guard", () => {
                           bonzo_prospect_id: 5150,
                           bonzo_email: "d@example.com",
                           insights_enabled: true,
-                          stage: "hot_lead",
+                          stage: "quoted_follow_up",
                         },
                         error: null,
                       }
@@ -305,7 +359,7 @@ describe("refresh_cache cost guard", () => {
                           bonzo_prospect_id: 5150,
                           bonzo_email: "d@example.com",
                           insights_enabled: true,
-                          stage: "hot_lead",
+                          stage: "quoted_follow_up",
                         },
                         error: null,
                       }

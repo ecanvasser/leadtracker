@@ -15,6 +15,7 @@ import {
   LOAN_TYPES,
   CRM_OPTIONS,
   ALL_STAGES,
+  QUEUE_ELIGIBLE_STAGES,
   ADVERSE_REASONS,
   LOAN_TYPE_LABELS,
   CRM_LABELS,
@@ -43,6 +44,17 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Card, CardContent } from "@/components/ui/card";
 import { toast } from "sonner";
 import { Trash2, Plus, Search, Loader2, Download, AlertTriangle } from "lucide-react";
+
+/**
+ * The stage a lead has to be in to be worked, named for the user.
+ *
+ * Derived rather than written out: Phase 7 moved automation from Hot Leads to
+ * Quoted – Follow Up, and these strings said "Hot Leads" in two places. Reading
+ * it off the constant means the next move updates the copy too.
+ */
+const QUEUE_ELIGIBLE_LABEL = QUEUE_ELIGIBLE_STAGES.map(
+  (s) => STAGE_LABELS[s]
+).join(" or ");
 
 interface ContactDialogProps {
   contact: Contact | null;
@@ -303,7 +315,7 @@ export function ContactDialog({
         toast.success(`${importName} imported with history`, {
           description: isQueueEligible(stage)
             ? undefined
-            : `Parked in ${STAGE_LABELS[stage]} — not worked until it moves to Hot Leads.`,
+            : `Parked in ${STAGE_LABELS[stage]} — not worked until it moves to ${QUEUE_ELIGIBLE_LABEL}.`,
         });
       }
     } catch {
@@ -632,8 +644,8 @@ export function ContactDialog({
                         <p className="text-[11px] text-muted-foreground">
                           Insights will be enabled, but a lead in{" "}
                           {STAGE_LABELS[stage]} is not worked by the queue — no
-                          cadence, drafts, or Telegram pushes until you move it
-                          to Hot Leads.
+                          classification, queue cards, or Telegram pushes until
+                          you move it to {QUEUE_ELIGIBLE_LABEL}.
                         </p>
                       )}
 

@@ -28,9 +28,15 @@ export function crmKeyboard() {
   return kb;
 }
 
-export function stageKeyboard(prefix = "stage", includeAdverse = true) {
+/**
+ * `includeTerminal` covers both off-board stages — Adverse and, since Phase 7,
+ * Funded. It kept the name `includeAdverse` for one release too long after
+ * Funded joined ALL_STAGES; the flag has always meant "offer the stages that
+ * are not board columns".
+ */
+export function stageKeyboard(prefix = "stage", includeTerminal = true) {
   const kb = new InlineKeyboard();
-  const stages = includeAdverse ? ALL_STAGES : PIPELINE_STAGES;
+  const stages = includeTerminal ? ALL_STAGES : PIPELINE_STAGES;
   stages.forEach((s) => kb.text(STAGE_LABELS[s], `${prefix}:${s}`).row());
   return kb;
 }
