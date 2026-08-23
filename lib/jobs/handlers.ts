@@ -8,7 +8,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { isQueueEligible } from "@/types/db";
+import { isQueueEligible, type Contact } from "@/types/db";
 import {
   getCommunicationHistory,
   getProspectNotes,
@@ -20,7 +20,7 @@ import {
 } from "@/lib/bonzo/client";
 import { analyzeProspect } from "@/lib/insights/analyze";
 import type { Job } from "@/lib/jobs/queue";
-import { classifyLeadState, shouldClassify } from "@/lib/insights/lead-state";
+import { classifyLeadState, shouldClassify, type LeadState } from "@/lib/insights/lead-state";
 import { getUserTimezone, localDate, leadAgeDays } from "@/lib/time";
 import { enqueueJob } from "@/lib/jobs/queue";
 import { scanForCallCommitments, recordProposedCall } from "@/lib/calls/scan";
@@ -298,6 +298,41 @@ export const refreshCache: JobHandler = async (supabase, job) => {
     });
   }
 
+  /*
+   * Workflow evaluation runs here, on facts that were just refreshed, rather
+   * than on its own schedule. Two reasons: the triggers all read facts this
+   * job has already gathered, so a separate sweep would re-fetch them; and a
+   * lead's situation only changes when this job notices it changing.
+   *
+   * Failure is swallowed deliberately. A broken workflow must not fail the
+   * refresh — the cache, the classification and the reply detection are all
+   * still worth having, and reply detection is what shuts a sequence off when
+   * someone converts.
+   */
+  let workflowSummary = "";
+  try {
+    const { runWorkflowsForContact, buildFacts } = await import("@/lib/workflows/run");
+    const facts = buildFacts({
+      contact: contact as unknown as Contact,
+      prospect: resolved,
+      communications,
+      leadState: classification?.state ?? (cache?.lead_state as LeadState | null) ?? null,
+      leadStateAt: classification ? new Date().toISOString() : (cache?.lead_state_at as string | null) ?? null,
+      previousStage: null,
+      hasNewInbound,
+    });
+
+    const wf = await runWorkflowsForContact({
+      supabase,
+      userId: contact.user_id,
+      contact: contact as unknown as Contact,
+      facts,
+    });
+    if (wf.ran) workflowSummary = `; workflow ${wf.status}: ${wf.summary}`;
+  } catch (e) {
+    console.error(`[jobs/refresh_cache] workflow evaluation failed for ${contactId}:`, e);
+  }
+
   return {
     summary:
       `refreshed with ${communications.length} messages` +
@@ -310,7 +345,8 @@ export const refreshCache: JobHandler = async (supabase, job) => {
           ? "; classification failed"
           : `; not reclassified (${due.reason})`) +
       (hasNewInbound ? "; new inbound reply, queued a response" : "") +
-      (proposedCall ? "; proposed a call for confirmation" : ""),
+      (proposedCall ? "; proposed a call for confirmation" : "") +
+      workflowSummary,
     usedModel: true,
   };
 };

@@ -136,6 +136,11 @@ export interface BonzoProspect {
    */
   /** Objects with id/name, not bare strings. */
   tags: BonzoTag[];
+  /**
+   * Campaigns the prospect is enrolled in. An array in the API, but
+   * single-valued in practice — enrolment replaces rather than appends.
+   */
+  campaigns?: { id: number; name: string; sequence_start?: string }[];
   /** The real key. See BonzoMortgageFields. */
   mortgage: BonzoMortgageFields | null;
 
@@ -567,4 +572,42 @@ export async function listCampaigns(): Promise<BonzoCampaign[]> {
   }
 
   return all;
+}
+
+/**
+ * Moves a prospect into a campaign.
+ *
+ * REPLACES rather than appends — proven by live probe, and named "Move to
+ * campaign" for that reason. That is the intended behaviour: Eddie's campaigns
+ * are a state machine mirroring his pipeline and a prospect sits in exactly
+ * one, so moving campaigns *is* the transition. It does mean the previous
+ * enrolment is lost unless the caller recorded it first, which is what
+ * workflow_runs.displaced is for.
+ *
+ * Requires the `campaigns` token scope.
+ */
+export async function moveProspectToCampaign(
+  prospectId: number,
+  campaignId: number
+): Promise<void> {
+  await bonzoFetch(`/v3/prospects/${prospectId}/campaign/${campaignId}`, {
+    method: "POST",
+  });
+}
+
+/**
+ * The campaign a prospect is currently in, or null.
+ *
+ * Read before a move so the displaced campaign can be recorded and put back.
+ * The API returns an array, but enrolment is single-valued in practice; the
+ * first entry is taken and the whole array is preserved by the caller.
+ */
+export function currentCampaign(
+  prospect: Pick<BonzoProspect, "campaigns"> | null | undefined
+): { id: number; name: string } | null {
+  const list = prospect?.campaigns;
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const first = list[0] as { id?: number; name?: string };
+  if (typeof first?.id !== "number") return null;
+  return { id: first.id, name: first.name ?? String(first.id) };
 }

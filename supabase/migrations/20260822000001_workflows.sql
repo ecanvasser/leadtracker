@@ -99,6 +99,10 @@ create table if not exists workflow_runs (
 
   error text,
 
+  -- Set when an approval card was pushed, so the card can be edited in place
+  -- once Eddie answers rather than leaving a live Send button on screen.
+  telegram_message_id bigint,
+
   /*
    * 4.4 idempotency: "a given workflow fires at most once per contact per
    * trigger occurrence".
@@ -125,6 +129,7 @@ create table if not exists workflow_runs (
 );
 
 alter table workflow_runs add column if not exists displaced jsonb;
+alter table workflow_runs add column if not exists telegram_message_id bigint;
 
 create unique index if not exists workflow_runs_occurrence_uniq
   on workflow_runs (workflow_id, contact_id, occurrence_key);

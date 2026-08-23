@@ -15,6 +15,7 @@ import {
   handleCallbackQuery,
   handleTextMessage,
 } from "@/lib/telegram/commands";
+import { handlePause, handleResume } from "@/lib/telegram/workflow-handlers";
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
 
@@ -51,6 +52,9 @@ function getHandler(): (req: Request) => Promise<Response> {
   bot.command("task", handleTask);
   bot.command("done", handleDone);
   bot.command("delete", handleDelete);
+  // 4.4 kill switch, reachable from the phone.
+  bot.command("pause", handlePause);
+  bot.command("resume", handleResume);
   bot.on("callback_query:data", handleCallbackQuery);
   bot.on("message:text", handleTextMessage);
 

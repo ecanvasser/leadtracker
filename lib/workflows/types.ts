@@ -88,6 +88,7 @@ export interface WorkflowRun {
   displaced: Record<string, unknown> | null;
   error: string | null;
   occurrence_key: string;
+  telegram_message_id: number | null;
 }
 
 /**

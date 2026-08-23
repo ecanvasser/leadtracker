@@ -1,5 +1,6 @@
 import { type Context } from "grammy";
 import { createServiceClient } from "@/lib/supabase/service";
+import { handleWorkflowCallback } from "@/lib/telegram/workflow-handlers";
 import { getUserIdByTelegramId, redeemLinkToken } from "@/lib/db/telegram";
 import { withSession, type SessionData } from "@/lib/telegram/session";
 import {
@@ -107,6 +108,8 @@ export async function handleHelp(ctx: Context) {
       "/task — Add a task to a contact\n" +
       "/done — Mark a task complete\n" +
       "/delete — Delete a contact\n" +
+      "/pause — Stop all workflows\n" +
+      "/resume — Start them again\n" +
       "/help — Show this message",
     { parse_mode: "HTML" }
   );
@@ -275,6 +278,9 @@ async function callbackFlow(ctx: Context, session: SessionData, clear: Clear) {
   // Approval-card callbacks answer themselves and must be matched before the
   // contact-management flows below, which claim broad prefixes.
   if (await handleApprovalCallback(ctx, session)) return;
+  // Workflow approval taps. Checked alongside the queue's own callbacks; the
+  // two use distinct prefixes so neither can swallow the other's.
+  if (await handleWorkflowCallback(ctx)) return;
   await ctx.answerCallbackQuery();
 
   const supabase = createServiceClient();
