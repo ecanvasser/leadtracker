@@ -18,8 +18,6 @@ import {
   TaskWithContact,
   PipelineStage,
   AllStages,
-  PIPELINE_STAGES,
-  ALL_STAGES,
   STAGE_LABELS,
   ADVERSE_REASONS,
   ADVERSE_REASON_LABELS,
@@ -27,6 +25,7 @@ import {
   type AdverseReason,
 } from "@/types/db";
 import type { BoardMeta } from "@/app/(app)/board/page";
+import { BOARD_COLUMNS, columnById, columnForStage, stageForDrop } from "./columns";
 import { StageColumn } from "./stage-column";
 import { TodoColumn } from "./todo-column";
 import { ContactCard } from "./contact-card";
@@ -44,33 +43,32 @@ interface BoardProps {
   userId: string;
 }
 
-/** Board filters. "excluded" surfaces hot leads the queue cannot see. */
-type BoardFilter = "all" | "excluded" | "quiet" | "interested" | "untouched";
+/**
+ * Board filters. "excluded" surfaces hot leads the queue cannot see.
+ *
+ * Phase 8 section 3 adds the whose-turn axis, which is now the primary one:
+ * the board's other filters describe what a lead *is*, and these two describe
+ * whether Eddie has to do anything about it. They read the same verdict the
+ * Today screen renders, computed by the same function.
+ */
+type BoardFilter =
+  | "all"
+  | "yours"
+  | "overdue"
+  | "excluded"
+  | "quiet"
+  | "interested"
+  | "untouched";
 
 const FILTER_LABELS: Record<BoardFilter, string> = {
   all: "All",
+  yours: "Your move",
+  overdue: "Overdue",
   excluded: "Not in queue",
   interested: "Interested",
   quiet: "Gone quiet",
   untouched: "Never contacted",
 };
-
-/**
- * Columns that start collapsed when there is no stored preference.
- *
- * Phase 7 took the board to six pipeline stages plus Todo, which needs 1964px
- * at min-width — a 1440px laptop hides two columns behind a horizontal scroll.
- * Collapsing the three post-conversion stages brings it to 1328px, so the
- * board fits on first load instead of requiring a preference to be set before
- * it is usable.
- *
- * These are the stages Eddie is not working minute to minute: once a deal is
- * App In it is with the lender. Any of them expands with one click, and the
- * choice is remembered from then on.
- */
-const DEFAULT_COLLAPSED: AllStages[] = ["app_in", "submission", "processing"];
-
-const COLLAPSED_STORAGE_KEY = "board:collapsed-columns";
 
 export function Board({
   initialContacts,
@@ -88,45 +86,6 @@ export function Board({
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<BoardFilter>("all");
   const [adverseFor, setAdverseFor] = useState<Contact | null>(null);
-  const [collapsed, setCollapsed] = useState<Set<AllStages>>(
-    () => new Set(DEFAULT_COLLAPSED)
-  );
-
-  // Read on mount rather than in the initialiser: localStorage does not exist
-  // during the server render, and reading it in useState would desync the
-  // first client paint from the server HTML.
-  useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(COLLAPSED_STORAGE_KEY);
-      if (raw === null) return;
-      const stored = JSON.parse(raw);
-      if (!Array.isArray(stored)) return;
-      // Filter against ALL_STAGES so a renamed or removed stage in storage
-      // cannot collapse something that no longer exists.
-      setCollapsed(
-        new Set(stored.filter((v): v is AllStages => ALL_STAGES.includes(v)))
-      );
-    } catch {
-      // A corrupt or unavailable store just means the defaults stand.
-    }
-  }, []);
-
-  const toggleCollapsed = useCallback((stage: AllStages) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(stage)) next.delete(stage);
-      else next.add(stage);
-      try {
-        window.localStorage.setItem(
-          COLLAPSED_STORAGE_KEY,
-          JSON.stringify([...next])
-        );
-      } catch {
-        // Persisting is a convenience; the toggle still works this session.
-      }
-      return next;
-    });
-  }, []);
   const supabase = createClient();
   const router = useRouter();
 
@@ -210,6 +169,13 @@ export function Board({
   const matchesFilter = (c: Contact): boolean => {
     const m = initialMeta[c.id];
     switch (filter) {
+      // The whose-turn axis. `turn` is the verdict from lib/turn/, computed
+      // server-side by the same function the Today screen uses, so a lead the
+      // board calls "your move" is the same lead Today counts.
+      case "yours":
+        return m?.turn === "your_move";
+      case "overdue":
+        return m?.turn === "their_move";
       case "excluded":
         return isQueueEligible(c.stage) && !c.insights_enabled;
       // Phase 7: filters read the post-pitch taxonomy. "Interested" is the
@@ -229,9 +195,14 @@ export function Board({
     }
   };
 
-  const contactsByStage = (stage: AllStages) =>
+  const contactsInColumn = (columnId: string) =>
     contacts
-      .filter((c) => c.stage === stage && matchesQuery(c) && matchesFilter(c))
+      .filter(
+        (c) =>
+          columnForStage(c.stage)?.id === columnId &&
+          matchesQuery(c) &&
+          matchesFilter(c)
+      )
       .sort((a, b) => a.position - b.position);
 
   const filteredCount = contacts.filter(
@@ -307,22 +278,70 @@ export function Board({
     }
   }
 
+  /**
+   * D2: sets the specific stage from a card's badge in the merged column.
+   *
+   * The same write a drag makes, so the same database trigger records it to
+   * stage_transitions. Nothing about the history depends on which control the
+   * change came from.
+   */
+  async function handleChangeStage(contact: Contact, stage: PipelineStage) {
+    const previous = contact.stage;
+    setContacts((prev) =>
+      prev.map((c) => (c.id === contact.id ? { ...c, stage } : c))
+    );
+
+    const { error } = await supabase
+      .from("contacts")
+      .update({ stage })
+      .eq("id", contact.id);
+
+    if (error) {
+      setContacts((prev) =>
+        prev.map((c) => (c.id === contact.id ? { ...c, stage: previous } : c))
+      );
+      toast.error("Could not change that stage");
+      return;
+    }
+
+    toast.success(`${contact.name} → ${STAGE_LABELS[stage]}`);
+  }
+
   function handleDragStart(event: DragStartEvent) {
     const contact = contacts.find((c) => c.id === event.active.id);
     if (contact) setActiveContact(contact);
+  }
+
+  /**
+   * Resolves what was dropped on into a column.
+   *
+   * A drop lands either on a column's own droppable id or on a card inside
+   * one, and since D2 those are no longer the same thing as a stage — the id
+   * is `col_in_process` while the card in it might be App In, Submission or
+   * Processing. Both cases funnel through here so the two drag handlers
+   * cannot disagree about where a card went.
+   */
+  function resolveDrop(overId: string) {
+    const asColumn = columnById(overId);
+    if (asColumn) return { column: asColumn, droppedOnColumn: true };
+
+    const overStage = contacts.find((c) => c.id === overId)?.stage;
+    return {
+      column: overStage ? columnForStage(overStage) : undefined,
+      droppedOnColumn: false,
+    };
   }
 
   function handleDragOver(event: DragOverEvent) {
     const { active, over } = event;
     if (!over || !activeContact) return;
 
-    const overId = over.id as string;
-    const isStageColumn = PIPELINE_STAGES.includes(overId as PipelineStage);
-    const newStage = isStageColumn
-      ? (overId as PipelineStage)
-      : contacts.find((c) => c.id === overId)?.stage;
+    const { column } = resolveDrop(over.id as string);
+    if (!column) return;
 
-    if (newStage && newStage !== activeContact.stage) {
+    const newStage = stageForDrop(column, activeContact.stage);
+
+    if (newStage !== activeContact.stage) {
       setContacts((prev) =>
         prev.map((c) =>
           c.id === active.id ? { ...c, stage: newStage } : c
@@ -343,43 +362,49 @@ export function Board({
     if (!contact) return;
 
     const overId = over.id as string;
-    const isStageColumn = ALL_STAGES.includes(overId as AllStages);
-    const targetStage: AllStages = isStageColumn
-      ? (overId as AllStages)
-      : contacts.find((c) => c.id === overId)?.stage ?? contact.stage;
+    const { column, droppedOnColumn } = resolveDrop(overId);
+    if (!column) return;
 
-    // 4.6 — dropping onto Adverse asks for the reason inline rather than
-    // sending you to the detail page for a dropdown and a Save. The move is
-    // committed by the picker so a cancel leaves the lead where it was.
-    //
-    // 6.3 — unreachable from the board today: there is no Adverse column to
-    // drop onto. Kept because 'adverse' is still a valid stage and this is the
-    // correct behaviour if the column ever returns; the picker it opens is very
-    // much alive, driven now by the control on the card.
-    if (targetStage === "adverse" && contact.stage !== "adverse") {
-      setAdverseFor(contact);
-      return;
-    }
+    /*
+     * D2: dropping into the merged column assigns App In, but only when the
+     * card is arriving from somewhere else. A Processing card nudged up two
+     * places inside its own column is a reorder, not a demotion — stageForDrop
+     * keeps the current stage whenever the column already holds it.
+     *
+     * The Adverse branch that used to live here is gone with the column model.
+     * It was already documented as unreachable — there has been no Adverse
+     * column to drop onto since 6.3 — and now a drop target is either a
+     * `col_*` id or a card in one of the four columns, none of which can be
+     * adverse. Marking a lead dead is the control on the card, which is very
+     * much alive.
+     */
+    const targetStage: AllStages = stageForDrop(column, contact.stage);
 
-    const stageContacts = contacts
-      .filter((c) => c.stage === targetStage && c.id !== contactId)
+    /*
+     * Position is ordered within the *column*, not within the stage. The
+     * merged column interleaves three stages in one list, so ordering per
+     * stage would make a card jump on drop to wherever its own stage's run
+     * happened to be.
+     */
+    const columnContacts = contacts
+      .filter((c) => columnForStage(c.stage)?.id === column.id && c.id !== contactId)
       .sort((a, b) => a.position - b.position);
 
     let newPosition: number;
-    if (isStageColumn || stageContacts.length === 0) {
-      newPosition = stageContacts.length > 0
-        ? stageContacts[stageContacts.length - 1].position + 1000
+    if (droppedOnColumn || columnContacts.length === 0) {
+      newPosition = columnContacts.length > 0
+        ? columnContacts[columnContacts.length - 1].position + 1000
         : 1000;
     } else {
-      const overIndex = stageContacts.findIndex((c) => c.id === overId);
+      const overIndex = columnContacts.findIndex((c) => c.id === overId);
       if (overIndex === 0) {
-        newPosition = stageContacts[0].position / 2;
+        newPosition = columnContacts[0].position / 2;
       } else if (overIndex === -1) {
-        newPosition = stageContacts[stageContacts.length - 1].position + 1000;
+        newPosition = columnContacts[columnContacts.length - 1].position + 1000;
       } else {
         newPosition =
-          (stageContacts[overIndex - 1].position +
-            stageContacts[overIndex].position) /
+          (columnContacts[overIndex - 1].position +
+            columnContacts[overIndex].position) /
           2;
       }
     }
@@ -535,19 +560,17 @@ export function Board({
               bar and shortcuts panel can now change — the columns would then
               be sized against a header that is no longer that tall. */}
           <div className="flex gap-4 p-4 md:p-6 h-full min-h-0">
-            {PIPELINE_STAGES.map((stage) => (
+            {BOARD_COLUMNS.map((column) => (
               <StageColumn
-                key={stage}
-                stage={stage}
-                label={STAGE_LABELS[stage]}
-                contacts={contactsByStage(stage)}
+                key={column.id}
+                column={column}
+                contacts={contactsInColumn(column.id)}
                 taskCounts={taskCounts}
                 meta={initialMeta}
                 onContactClick={(id) => router.push(`/contacts/${id}`)}
                 onEnroll={handleEnroll}
                 onMarkAdverse={setAdverseFor}
-                collapsed={collapsed.has(stage)}
-                onToggleCollapse={toggleCollapsed}
+                onChangeStage={handleChangeStage}
               />
             ))}
 

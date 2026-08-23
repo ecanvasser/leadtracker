@@ -2,7 +2,7 @@
 
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Contact } from "@/types/db";
+import { Contact, type PipelineStage } from "@/types/db";
 import type { BoardMeta } from "@/app/(app)/board/page";
 import { ContactCard } from "./contact-card";
 
@@ -13,6 +13,8 @@ interface SortableContactCardProps {
   onClick: () => void;
   onEnroll?: (contactId: string) => void;
   onMarkAdverse?: (contact: Contact) => void;
+  stageOptions?: readonly PipelineStage[];
+  onChangeStage?: (contact: Contact, stage: PipelineStage) => void;
 }
 
 export function SortableContactCard({
@@ -22,6 +24,8 @@ export function SortableContactCard({
   onClick,
   onEnroll,
   onMarkAdverse,
+  stageOptions,
+  onChangeStage,
 }: SortableContactCardProps) {
   const {
     attributes,
@@ -47,6 +51,8 @@ export function SortableContactCard({
         onClick={onClick}
         onEnroll={onEnroll}
         onMarkAdverse={onMarkAdverse}
+        stageOptions={stageOptions}
+        onChangeStage={onChangeStage}
       />
     </div>
   );

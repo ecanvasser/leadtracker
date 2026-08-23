@@ -1,11 +1,23 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Contact, LOAN_TYPE_LABELS, isQueueEligible } from "@/types/db";
+import {
+  Contact,
+  LOAN_TYPE_LABELS,
+  STAGE_LABELS,
+  isQueueEligible,
+  type PipelineStage,
+} from "@/types/db";
 import { Badge } from "@/components/ui/badge";
 // One badge map for the board card and the Today row — the same fact must not
 // be orange in one place and grey in another.
 import { PITCH_STYLE } from "@/lib/turn/badges";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { ListTodo, EyeOff, Plus, Ban } from "lucide-react";
 import type { BoardMeta } from "@/app/(app)/board/page";
 
@@ -17,6 +29,14 @@ interface ContactCardProps {
   onEnroll?: (contactId: string) => void;
   /** Opens the adverse reason picker. Omitted on the drag overlay. */
   onMarkAdverse?: (contact: Contact) => void;
+  /**
+   * The stages this card's column can hold, when there is more than one.
+   * Present only for the merged In Process column (D2), where the specific
+   * stage is no longer visible from the column heading and has to live on the
+   * card instead.
+   */
+  stageOptions?: readonly PipelineStage[];
+  onChangeStage?: (contact: Contact, stage: PipelineStage) => void;
   isDragging?: boolean;
 }
 
@@ -40,6 +60,8 @@ export function ContactCard({
   onClick,
   onEnroll,
   onMarkAdverse,
+  stageOptions,
+  onChangeStage,
   isDragging,
 }: ContactCardProps) {
   // 6.3 — the Adverse column is gone, so marking a lead dead lives here. Hover
@@ -149,6 +171,47 @@ export function ContactCard({
           <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-normal">
             {sincePitch}
           </Badge>
+        )}
+
+        {/*
+          D2: three stages share the In Process column, so the card carries the
+          one it is actually in — and carries it as the control that changes
+          it. Dropping into that column assigns App In; correcting that to
+          Submission or Processing is one click here rather than a trip to the
+          contact page.
+        */}
+        {stageOptions && stageOptions.length > 1 && !isDragging && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                title="Change stage"
+                // The drag listeners sit on the wrapper. The pointer sensor
+                // has an 8px activation distance so a click alone will not
+                // start a drag, but the press must still not reach the card's
+                // own onClick — the same reason the adverse control does this.
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+                className="rounded border border-border/60 px-1.5 py-0 text-[10px] font-normal text-muted-foreground hover:border-border hover:text-foreground transition-colors"
+              >
+                {STAGE_LABELS[contact.stage]}
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
+              {stageOptions.map((stage) => (
+                <DropdownMenuItem
+                  key={stage}
+                  disabled={stage === contact.stage}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onChangeStage?.(contact, stage);
+                  }}
+                >
+                  {STAGE_LABELS[stage]}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
         )}
       </div>
 
