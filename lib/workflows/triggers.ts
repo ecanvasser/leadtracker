@@ -41,6 +41,29 @@ export function daysSince(iso: string | null | undefined, now: Date): number | n
 }
 
 /**
+ * The later of two timestamps, ignoring nulls.
+ *
+ * "Gone quiet for n days" means quiet *since the thing that started the
+ * clock*, not since some older event. A lead who replied on Monday and was
+ * pitched on Thursday has not been quiet for three days — they have been quiet
+ * since Thursday, and they have not had a chance to answer the number yet.
+ *
+ * Measuring from the earlier of the two would fire the 2-day handoff the
+ * instant a lead was pitched, dropping a live deal into a cold campaign before
+ * it had a chance to reply. That is the single worst thing this system can do,
+ * so the clock always starts at the later event.
+ */
+function laterOf(a: string | null, b: string | null): string | null {
+  if (!a) return b;
+  if (!b) return a;
+  const ta = new Date(a).getTime();
+  const tb = new Date(b).getTime();
+  if (!Number.isFinite(ta)) return b;
+  if (!Number.isFinite(tb)) return a;
+  return ta >= tb ? a : b;
+}
+
+/**
  * Short, stable stand-in for "never happened".
  *
  * Distinct from a timestamp so a lead who has never replied gets one
@@ -94,7 +117,8 @@ export function matchTrigger(
       const want = cfg.days;
       if (typeof want !== "number") return NO_MATCH("trigger_config.days missing");
 
-      const from = facts.lastInboundAt ?? facts.stageChangedAt;
+      // The later of their last reply and entering the stage. See laterOf().
+      const from = laterOf(facts.lastInboundAt, facts.stageChangedAt);
       if (!from) return NO_MATCH("no inbound and no stage entry time to measure from");
 
       const elapsed = daysSince(from, now);
@@ -103,7 +127,7 @@ export function matchTrigger(
 
       return {
         matched: true,
-        occurrenceKey: `no_inbound_since:${facts.lastInboundAt ?? NEVER}:${want}`,
+        occurrenceKey: `no_inbound_since:${from}:${want}`,
         snapshot: {
           last_inbound_at: facts.lastInboundAt,
           measured_from: from,
@@ -118,7 +142,7 @@ export function matchTrigger(
       const want = cfg.days;
       if (typeof want !== "number") return NO_MATCH("trigger_config.days missing");
 
-      const from = facts.lastOutboundAt ?? facts.stageChangedAt;
+      const from = laterOf(facts.lastOutboundAt, facts.stageChangedAt);
       if (!from) return NO_MATCH("no outbound and no stage entry time to measure from");
 
       const elapsed = daysSince(from, now);
@@ -127,7 +151,7 @@ export function matchTrigger(
 
       return {
         matched: true,
-        occurrenceKey: `no_outbound_since:${facts.lastOutboundAt ?? NEVER}:${want}`,
+        occurrenceKey: `no_outbound_since:${from}:${want}`,
         snapshot: {
           last_outbound_at: facts.lastOutboundAt,
           measured_from: from,

@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   evaluateWorkflows,
   hardStopReason,
@@ -322,6 +324,38 @@ describe("triggers", () => {
     expect(matchTrigger(wf, facts({ lastInboundAt: ago(9) }), NOW).matched).toBe(true);
   });
 
+  /*
+   * The bug this guards: measuring from the last reply alone fires the 2-day
+   * handoff the instant a lead is pitched, if they happened to have been quiet
+   * before the pitch. A freshly quoted lead has not gone quiet — they have not
+   * had a chance to answer yet.
+   */
+  it("no_inbound_since measures from the pitch, not from older silence", () => {
+    const wf = workflow({ trigger_config: { days: 2 } });
+    // Replied 5 days ago, pitched (entered the stage) today.
+    const justPitched = facts({ lastInboundAt: ago(5), stageChangedAt: ago(0) });
+    const m = matchTrigger(wf, justPitched, NOW);
+    expect(m.matched).toBe(false);
+    expect(m.snapshot).toEqual({});
+  });
+
+  it("no_inbound_since fires two days after the pitch, not after the old reply", () => {
+    const wf = workflow({ trigger_config: { days: 2 } });
+    const quiet = facts({ lastInboundAt: ago(5), stageChangedAt: ago(2) });
+    const m = matchTrigger(wf, quiet, NOW);
+    expect(m.matched).toBe(true);
+    expect(m.snapshot.measured_from).toBe(quiet.stageChangedAt);
+  });
+
+  it("no_inbound_since still measures from a reply that came after the pitch", () => {
+    // They answered the quote, then went quiet again. The clock restarts.
+    const wf = workflow({ trigger_config: { days: 2 } });
+    const repliedAfter = facts({ lastInboundAt: ago(3), stageChangedAt: ago(9) });
+    const m = matchTrigger(wf, repliedAfter, NOW);
+    expect(m.matched).toBe(true);
+    expect(m.snapshot.measured_from).toBe(repliedAfter.lastInboundAt);
+  });
+
   it("no_inbound_since measures from stage entry when they never replied", () => {
     const wf = workflow({ trigger_config: { days: 2 } });
     const never = facts({ lastInboundAt: null, stageChangedAt: ago(4) });
@@ -404,5 +438,127 @@ describe("message-causing actions", () => {
     expect(causesMessage("create_task")).toBe(false);
     expect(causesMessage("notify_telegram")).toBe(false);
     expect(causesMessage("move_stage")).toBe(false);
+  });
+});
+
+/*
+ * The two seed workflows (4.6), exactly as 20260822000002 creates them.
+ *
+ * They are tested together because the interesting behaviour is the
+ * interaction: the park has to beat the handoff on the evaluation where a lead
+ * has just been pitched, or a fresh lead is handed to a cold campaign the
+ * moment it arrives.
+ */
+describe("seed workflows", () => {
+  const park = workflow({
+    id: "wf-park",
+    name: "Park in No Drip while I work them",
+    trigger_type: "stage_changed",
+    trigger_config: { stage: "quoted_follow_up", direction: "into" },
+    action_type: "add_to_bonzo_campaign",
+    action_config: { campaign_id: 122735 },
+    priority: 10,
+  });
+
+  const handoff = workflow({
+    id: "wf-handoff",
+    name: "Hand off after 2 quiet days",
+    trigger_type: "no_inbound_since",
+    trigger_config: { days: 2 },
+    conditions: { stage: ["quoted_follow_up"] },
+    action_type: "add_to_bonzo_campaign",
+    action_config: { campaign_id: 43998 },
+    priority: 100,
+  });
+
+  const seeds = [park, handoff];
+
+  it("parks a freshly pitched lead rather than handing it off", () => {
+    // The lead last replied five days ago and was pitched today. Both rules
+    // could look applicable; only the park is correct.
+    const justPitched = facts({
+      previousStage: "needs_quote",
+      stage: "quoted_follow_up",
+      stageChangedAt: ago(0),
+      lastInboundAt: ago(5),
+    });
+
+    const out = evaluate({ workflows: seeds, facts: justPitched });
+    expect(out.fired).toBe(true);
+    if (!out.fired) return;
+    expect(out.workflow.id).toBe("wf-park");
+    expect(out.workflow.action_config.campaign_id).toBe(122735);
+  });
+
+  it("hands off two quiet days after the pitch", () => {
+    const goneQuiet = facts({
+      previousStage: null,
+      stageChangedAt: ago(2),
+      lastInboundAt: ago(5),
+    });
+
+    const out = evaluate({ workflows: seeds, facts: goneQuiet });
+    expect(out.fired).toBe(true);
+    if (!out.fired) return;
+    expect(out.workflow.id).toBe("wf-handoff");
+    expect(out.workflow.action_config.campaign_id).toBe(43998);
+  });
+
+  it("does not hand off a lead who answered the quote yesterday", () => {
+    const answered = facts({
+      previousStage: null,
+      stageChangedAt: ago(6),
+      lastInboundAt: ago(1),
+    });
+    expect(evaluate({ workflows: seeds, facts: answered }).fired).toBe(false);
+  });
+
+  it("both require approval, so neither messages anyone unattended", () => {
+    for (const w of seeds) expect(w.requires_approval).toBe(true);
+  });
+
+  /*
+   * Read the migration itself rather than a fixture.
+   *
+   * The fixtures above set enabled=true so trigger matching can be tested at
+   * all, which means they prove nothing about how the seeds actually ship.
+   * 4.4 calls dry-run non-optional and Eddie intends to watch these for days
+   * before trusting them — so what matters is that the SQL creates them off,
+   * in dry-run, and asking first. This fails if anyone edits that.
+   */
+  it("the migration creates them off, in dry-run, and approval-required", () => {
+    const sql = readFileSync(
+      resolve(process.cwd(), "supabase/migrations/20260822000002_seed_workflows.sql"),
+      "utf8"
+    );
+
+    // Two inserts, each with the same literal block: enabled=false, dry_run=true.
+    const insertBlocks = sql.match(/^\s*false,\s*\n\s*true,\s*$/gm);
+    expect(insertBlocks).toHaveLength(2);
+
+    // Neither may ship enabled.
+    expect(sql).not.toMatch(/^\s*true,\s*\n\s*false,\s*$/m);
+
+    // Both campaign ids, both priorities, and approval-required on each.
+    expect(sql).toContain("122735");
+    expect(sql).toContain("43998");
+    expect(sql.match(/^\s*true,\s*\n\s*10\s*$/m)).toBeTruthy();
+    expect(sql.match(/^\s*true,\s*\n\s*100\s*$/m)).toBeTruthy();
+  });
+
+  it("the migration guards both inserts so re-running is safe", () => {
+    const sql = readFileSync(
+      resolve(process.cwd(), "supabase/migrations/20260822000002_seed_workflows.sql"),
+      "utf8"
+    );
+    // Production's migration history was originally empty; everything here
+    // has to survive being applied more than once.
+    expect(sql.match(/where not exists/gi)).toHaveLength(2);
+  });
+
+  it("stops entirely once the lead converts off the stage", () => {
+    // D4: Eddie moving them to App In is the signal to stop chasing.
+    const converted = facts({ stage: "app_in", stageChangedAt: ago(2), lastInboundAt: ago(5) });
+    expect(evaluate({ workflows: seeds, facts: converted }).fired).toBe(false);
   });
 });
