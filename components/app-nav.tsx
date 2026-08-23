@@ -2,64 +2,79 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 
+/**
+ * Phase 8 section 5. Today is first because it is now home; Adverse and Funded
+ * came off the top level because they are terminal lists reached from the
+ * board, not places to work.
+ *
+ * /daily is labelled Queue rather than Daily — the route stays, since renaming
+ * it would break every link and bookmark to no benefit.
+ */
 const LINKS = [
-  // Reachable, but not yet home — rollout step 3. The redirect in app/page.tsx
-  // and the nav order both change in step 4.
   { href: "/today", label: "Today" },
   { href: "/board", label: "Board" },
-  { href: "/daily", label: "Daily" },
+  { href: "/daily", label: "Queue" },
   { href: "/workflows", label: "Workflows" },
-  { href: "/adverse", label: "Adverse" },
-  { href: "/funded", label: "Funded" },
   { href: "/settings", label: "Settings" },
 ] as const;
 
 /**
  * Primary navigation.
  *
- * Two things the previous version lacked: any indication of where you are, and
- * a pending count anywhere except the board — which is the one page you are
- * least likely to be on when it matters.
+ * The badge moved from the queue's pending count to Today's "Your move"
+ * count, because that is now the number that decides whether the app needs
+ * opening at all. It is read from /api/today/summary, which calls the same
+ * loadToday the screen does — a badge that disagrees with the page it links
+ * to is worse than no badge.
  */
 export function AppNav() {
   const pathname = usePathname();
-  const [pending, setPending] = useState(0);
+  const [yourMove, setYourMove] = useState(0);
+  const [queuePending, setQueuePending] = useState(0);
   const supabase = createClient();
 
+  const load = useCallback(async () => {
+    const [today, queue] = await Promise.allSettled([
+      fetch("/api/today/summary").then((r) => r.json()),
+      fetch("/api/daily-queue/summary").then((r) => r.json()),
+    ]);
+    if (today.status === "fulfilled") setYourMove(today.value?.your_move ?? 0);
+    if (queue.status === "fulfilled") setQueuePending(queue.value?.pending ?? 0);
+  }, []);
+
   useEffect(() => {
-    let cancelled = false;
-
-    async function load() {
-      try {
-        const res = await fetch("/api/daily-queue/summary");
-        const data = await res.json();
-        if (!cancelled) setPending(data.pending ?? 0);
-      } catch {
-        // A failed count is not worth surfacing; the badge just stays put.
-      }
-    }
-
     load();
+  }, [load, pathname]);
 
-    // The count changes when the worker pushes work or an item is actioned
-    // from Telegram, neither of which this tab knows about otherwise.
+  useEffect(() => {
+    /*
+     * The counts change from places this tab cannot see: the worker writing a
+     * watermark, a Telegram action, a stage change in another tab. Coalesced
+     * into one refetch because a single refresh sweep can touch a dozen cache
+     * rows in a burst, and each one would otherwise be its own round trip.
+     */
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bump = () => {
+      clearTimeout(timer);
+      timer = setTimeout(load, 400);
+    };
+
     const channel = supabase
-      .channel("nav-queue-count")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "daily_queue" },
-        () => load()
-      )
+      .channel("nav-counts")
+      .on("postgres_changes", { event: "*", schema: "public", table: "daily_queue" }, bump)
+      .on("postgres_changes", { event: "*", schema: "public", table: "contacts" }, bump)
+      .on("postgres_changes", { event: "*", schema: "public", table: "insights_cache" }, bump)
+      .on("postgres_changes", { event: "*", schema: "public", table: "tasks" }, bump)
       .subscribe();
 
     return () => {
-      cancelled = true;
+      clearTimeout(timer);
       supabase.removeChannel(channel);
     };
-  }, [supabase]);
+  }, [supabase, load]);
 
   return (
     <div className="flex items-center gap-1 text-sm text-muted-foreground">
@@ -67,6 +82,7 @@ export function AppNav() {
         // startsWith so /contacts/:id does not orphan the nav, but exact for
         // the root sections themselves.
         const active = pathname === href || pathname.startsWith(`${href}/`);
+        const count = href === "/today" ? yourMove : href === "/daily" ? queuePending : 0;
 
         return (
           <Link
@@ -80,9 +96,18 @@ export function AppNav() {
             }`}
           >
             {label}
-            {href === "/daily" && pending > 0 && (
-              <span className="absolute -top-1 -right-1 h-4 min-w-4 px-1 flex items-center justify-center rounded-full bg-red-500 text-white text-[10px] font-bold tabular-nums">
-                {pending > 99 ? "99+" : pending}
+            {count > 0 && (
+              <span
+                className={`absolute -top-1 -right-1 h-4 min-w-4 px-1 flex items-center justify-center rounded-full text-[10px] font-bold tabular-nums ${
+                  href === "/today"
+                    ? "bg-red-500 text-white"
+                    : // The queue is a secondary count now. Two red badges
+                      // compete, and only one of them answers "is there
+                      // anything I have to do".
+                      "bg-muted-foreground/25 text-foreground"
+                }`}
+              >
+                {count > 99 ? "99+" : count}
               </span>
             )}
           </Link>

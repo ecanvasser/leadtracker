@@ -29,7 +29,7 @@ export default async function AppLayout({
       <nav className="border-b border-border/50 h-14 flex items-center px-4 md:px-6 shrink-0">
         <div className="flex items-center gap-6 w-full">
           <Link
-            href="/board"
+            href="/today"
             className="font-semibold text-sm tracking-tight"
           >
             Mortgage Tracker

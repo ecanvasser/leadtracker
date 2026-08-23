@@ -31,6 +31,7 @@ import { StageColumn } from "./stage-column";
 import { TodoColumn } from "./todo-column";
 import { ContactCard } from "./contact-card";
 import { ContactDialog } from "@/components/contact/contact-dialog";
+import Link from "next/link";
 import { toast } from "sonner";
 import { useRouter } from "next/navigation";
 import { Zap, Search, X } from "lucide-react";
@@ -481,6 +482,25 @@ export function Board({
         )}
 
         <div className="flex items-center gap-2 ml-auto">
+          {/*
+            Phase 8 section 5: Adverse and Funded came off the top-level nav.
+            They are terminal lists — places a lead ends up, not places Eddie
+            works — and the board is where a lead was sent to one of them, so
+            it is where you would go looking. Kept as plain links rather than
+            buttons: they are destinations, not actions.
+          */}
+          <Link
+            href="/adverse"
+            className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Adverse
+          </Link>
+          <Link
+            href="/funded"
+            className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Funded
+          </Link>
           <button
             onClick={() => router.push("/daily")}
             className="relative text-sm font-medium px-3 py-1.5 rounded-md border border-border hover:bg-accent transition-colors flex items-center gap-1.5"
