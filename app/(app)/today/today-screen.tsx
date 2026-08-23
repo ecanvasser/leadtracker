@@ -80,6 +80,18 @@ export function TodayScreen({
 
   const caughtUp = counts.your_move === 0 && counts.their_move === 0;
 
+  /*
+   * Section 2.2: the stage badge appears "only when it isn't obvious from the
+   * section". Which sections those are is a property of the data, not
+   * something to hardcode — Their move turns out to hold App In leads
+   * alongside the quoted ones, because a lead who has gone quiet mid-file is
+   * just as much a follow-up as one who went quiet after a pitch. So the
+   * badge shows wherever a section is not all one stage, and disappears on
+   * its own when it is.
+   */
+  const yourMoveMixed = distinctStages(yourMove) > 1;
+  const theirMoveMixed = distinctStages(theirMove) > 1;
+
   return (
     <div className="mx-auto w-full max-w-3xl px-4 py-8 md:px-6">
       <header className="mb-8">
@@ -124,23 +136,39 @@ export function TodayScreen({
         }
       >
         {yourMove.map((row) => (
-          <Row key={row.contact.id} row={row} now={now} timeZone={timeZone} onAct={act} busy={pending} />
+          <Row
+            key={row.contact.id}
+            row={row}
+            now={now}
+            timeZone={timeZone}
+            showStage={yourMoveMixed}
+            onAct={act}
+            busy={pending}
+          />
         ))}
       </Section>
 
       <Section
         title="Their move, overdue"
         count={counts.their_move}
-        blurb={`Pitched, quiet for ${overdueDays} ${overdueDays === 1 ? "day" : "days"} or more`}
+        blurb={`No reply for ${overdueDays} ${overdueDays === 1 ? "day" : "days"} or more`}
         empty={
           <EmptyState
             headline="Nobody's gone quiet."
-            detail={`Everyone pitched has either replied or is still inside the ${overdueDays}-day window.`}
+            detail={`Everyone you're waiting on has replied or is still inside the ${overdueDays}-day window.`}
           />
         }
       >
         {theirMove.map((row) => (
-          <Row key={row.contact.id} row={row} now={now} timeZone={timeZone} onAct={act} busy={pending} />
+          <Row
+            key={row.contact.id}
+            row={row}
+            now={now}
+            timeZone={timeZone}
+            showStage={theirMoveMixed}
+            onAct={act}
+            busy={pending}
+          />
         ))}
       </Section>
 
@@ -185,6 +213,11 @@ export function TodayScreen({
       )}
     </div>
   );
+}
+
+/** How many distinct stages a section holds. */
+function distinctStages(rows: TurnResult[]): number {
+  return new Set(rows.map((r) => r.contact.stage)).size;
 }
 
 function CountTile({
@@ -249,12 +282,14 @@ function Row({
   row,
   now,
   timeZone,
+  showStage,
   onAct,
   busy,
 }: {
   row: TurnResult;
   now: Date;
   timeZone: string;
+  showStage: boolean;
   onAct: (body: Record<string, unknown>, success: string) => Promise<void>;
   busy: boolean;
 }) {
@@ -267,10 +302,6 @@ function Row({
   const pitch = leadState?.pitch_response ? PITCH_STYLE[leadState.pitch_response] : null;
   const angle = leadState?.suggested_angle?.trim() || null;
   const evidence = leadState?.evidence?.trim() || null;
-
-  // The stage badge earns its place only where the section does not already
-  // imply the stage. Your move is a mix; overdue is always Quoted – Follow Up.
-  const showStage = row.section === "your_move";
 
   return (
     <div className="py-2.5">
@@ -303,7 +334,9 @@ function Row({
         <RowActions row={row} onAct={onAct} busy={busy} />
       </div>
 
-      {angle && (
+      {/* Truncated on the collapsed row; the expanded panel prints it in full,
+          so showing both would say the same thing twice. */}
+      {angle && !open && (
         <p className="mt-0.5 truncate pr-24 text-xs text-muted-foreground">{angle}</p>
       )}
 
