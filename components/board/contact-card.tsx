@@ -3,6 +3,9 @@
 import { useRef, useState } from "react";
 import { Contact, LOAN_TYPE_LABELS, isQueueEligible } from "@/types/db";
 import { Badge } from "@/components/ui/badge";
+// One badge map for the board card and the Today row — the same fact must not
+// be orange in one place and grey in another.
+import { PITCH_STYLE } from "@/lib/turn/badges";
 import { ListTodo, EyeOff, Plus, Ban } from "lucide-react";
 import type { BoardMeta } from "@/app/(app)/board/page";
 
@@ -17,23 +20,6 @@ interface ContactCardProps {
   isDragging?: boolean;
 }
 
-/**
- * Post-pitch badges. Colour carries the urgency; the label carries the fact.
- *
- * Phase 7: these read what the lead did with the number rather than how warm
- * they are. Warm is orange because it needs Eddie today; quiet is grey because
- * it needs a decision, not a reaction.
- */
-const PITCH_STYLE: Record<string, { label: string; className: string }> = {
-  converted_signal: { label: "Reads like a yes", className: "bg-green-500/15 text-green-600 dark:text-green-400" },
-  positive_intent: { label: "Interested", className: "bg-orange-500/15 text-orange-600 dark:text-orange-400" },
-  needs_info: { label: "Needs info", className: "bg-amber-500/15 text-amber-600 dark:text-amber-400" },
-  price_objection: { label: "Price", className: "bg-red-500/15 text-red-600 dark:text-red-400" },
-  timing_objection: { label: "Timing", className: "bg-slate-500/15 text-slate-600 dark:text-slate-400" },
-  competitor: { label: "Competitor", className: "bg-red-500/15 text-red-600 dark:text-red-400" },
-  soft_no: { label: "Soft no", className: "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400" },
-  no_response: { label: "No reply", className: "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400" },
-};
 
 
 /** Whole days since an ISO timestamp. */

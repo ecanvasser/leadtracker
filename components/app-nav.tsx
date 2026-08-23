@@ -6,6 +6,9 @@ import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 
 const LINKS = [
+  // Reachable, but not yet home — rollout step 3. The redirect in app/page.tsx
+  // and the nav order both change in step 4.
+  { href: "/today", label: "Today" },
   { href: "/board", label: "Board" },
   { href: "/daily", label: "Daily" },
   { href: "/workflows", label: "Workflows" },

@@ -11,6 +11,7 @@
  */
 
 import { InlineKeyboard } from "grammy";
+import { bonzoProspectUrl } from "@/lib/turn/links";
 import { LOAN_TYPE_LABELS, type LoanType } from "@/types/db";
 import type { LeadState } from "@/lib/insights/lead-state";
 
@@ -200,10 +201,14 @@ export function snoozeKeyboard(queueItemId: string): InlineKeyboard {
     .text("← Back", `${CB.back}:${queueItemId}`);
 }
 
-/** Deep link to the prospect. The app only ever links out; it never dials. */
-export function bonzoProspectUrl(prospectId: number): string {
-  return `https://platform.getbonzo.com/prospect/${prospectId}`;
-}
+/**
+ * Deep link to the prospect. The app only ever links out; it never dials.
+ *
+ * Defined in lib/turn/links.ts since Phase 8 — the Today row needs the same
+ * link and this module imports grammY. Re-exported so existing callers are
+ * untouched.
+ */
+export { bonzoProspectUrl };
 
 function truncate(s: string, max: number): string {
   const t = s.trim();
