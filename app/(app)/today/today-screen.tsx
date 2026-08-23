@@ -23,6 +23,7 @@ import { PITCH_STYLE } from "@/lib/turn/badges";
 import { describeWait } from "@/lib/turn/format";
 import { bonzoProspectUrl } from "@/lib/turn/links";
 import type { TurnResult } from "@/lib/turn/types";
+import { formatSpeed, type SpeedToQuote } from "@/lib/turn/speed";
 import {
   LOAN_TYPE_LABELS,
   PIPELINE_STAGES,
@@ -37,6 +38,7 @@ interface TodayScreenProps {
   counts: { your_move: number; their_move: number; waiting: number; total: number };
   timeZone: string;
   overdueDays: number;
+  speed: SpeedToQuote;
 }
 
 const SNOOZE_OPTIONS = [
@@ -52,6 +54,7 @@ export function TodayScreen({
   counts,
   timeZone,
   overdueDays,
+  speed,
 }: TodayScreenProps) {
   const [waitingOpen, setWaitingOpen] = useState(false);
   const router = useRouter();
@@ -122,6 +125,36 @@ export function TodayScreen({
         />
         <CountTile value={counts.waiting} label="Waiting" tone="calm" />
       </div>
+
+      {/*
+        Section 4.2: one number, with the count it is based on. Not a
+        dashboard, not a chart — if the median is four hours Eddie is
+        competitive, and if it is two days he is losing deals to whoever quoted
+        first, and nothing else on a chart would tell him that.
+
+        It says so plainly while stage_transitions is still filling up. The
+        table is forward-only and started empty, so an honest "not yet" is the
+        only truthful thing it can say for the first few weeks — and a number
+        computed from two data points would be worse than none.
+      */}
+      <p className="mb-8 text-xs text-muted-foreground">
+        {speed.count > 0 ? (
+          <>
+            Median time to quote:{" "}
+            <span className="font-medium text-foreground tabular-nums">
+              {formatSpeed(speed.medianHours)}
+            </span>{" "}
+            over the last {speed.windowDays} days, from {speed.count}{" "}
+            {speed.count === 1 ? "quote" : "quotes"}.
+          </>
+        ) : (
+          <>
+            Median time to quote: not enough history yet. Stage changes started
+            being recorded on 23 August; this fills in as leads move from Needs
+            Quote to Quoted.
+          </>
+        )}
+      </p>
 
       <Section
         title="Your move"

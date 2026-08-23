@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import { loadToday } from "@/lib/turn/load";
+import { loadSpeedToQuote } from "@/lib/turn/speed";
 import { TodayScreen } from "./today-screen";
 
 // Every other authenticated page in the app declares this. The three counts
@@ -20,7 +21,11 @@ export default async function TodayPage() {
   const { data: authData } = await supabase.auth.getClaims();
   if (!authData?.claims) redirect("/login");
 
-  const board = await loadToday(supabase, authData.claims.sub as string);
+  const userId = authData.claims.sub as string;
+  const [board, speed] = await Promise.all([
+    loadToday(supabase, userId),
+    loadSpeedToQuote(supabase, userId),
+  ]);
 
   return (
     <TodayScreen
@@ -30,6 +35,7 @@ export default async function TodayPage() {
       counts={board.counts}
       timeZone={board.timeZone}
       overdueDays={board.settings.overdueDays}
+      speed={speed}
     />
   );
 }

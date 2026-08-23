@@ -62,9 +62,11 @@ function input(over: Record<string, unknown> = {}) {
 
 /** Queues up the model's replies, one per call. */
 function mockModel(replies: string[]) {
-  // Typed loosely on purpose: the assertions below inspect the arguments,
-  // which vi.fn cannot infer from a zero-argument implementation.
-  const callModel = vi.fn(async (..._args: unknown[]) => {
+  // Declared with an argument it does not read, so vi.fn records call
+  // arguments — the assertions below inspect them, and a zero-argument
+  // implementation would leave mock.calls typed as empty tuples.
+  const callModel = vi.fn(async (opts: unknown) => {
+    void opts;
     const text = replies.shift() ?? "";
     return {
       text,
