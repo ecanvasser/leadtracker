@@ -10,7 +10,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { QUEUE_ELIGIBLE_STAGES } from "@/types/db";
+import { TERMINAL_STAGES } from "@/types/db";
 import { enqueueJob } from "@/lib/jobs/queue";
 import {
   getNotificationWindows,
@@ -85,15 +85,31 @@ export async function sweepRefreshJobs(
     return { swept: false, reason: "another tick claimed the sweep", enqueued: 0, skipped: 0 };
   }
 
-  // Queue-eligible stages only. The filter is deliberate — insights never
-  // extend to Needs Quote / App In / Submission / Processing. See
-  // QUEUE_ELIGIBLE_STAGES for which stages those are and why.
+  /*
+   * D1: every non-terminal stage, not just the queue-eligible one.
+   *
+   * The sweep used to mirror QUEUE_ELIGIBLE_STAGES, which Phase 7 narrowed to
+   * Quoted – Follow Up alone — so exactly one lead was being refreshed. The
+   * Today screen needs the direction of the last message for every active
+   * lead, because "did this person ask me something I haven't answered" is
+   * the signal it is built around, and a Needs Quote lead never reached this
+   * query.
+   *
+   * Widening the sweep does not widen the spend. refresh_cache gates
+   * classification and workflow evaluation on eligibility itself; what this
+   * buys is one Bonzo GET per lead per sweep and nothing else.
+   *
+   * insights_enabled is no longer part of the filter. It marks a lead as
+   * enrolled in the queue and the classifier, which is still what it gates
+   * inside the handler — but a watermark refresh is free and every active
+   * lead needs one. A linked Bonzo prospect is the only real precondition:
+   * without it there is nothing to read.
+   */
   const { data: contacts } = await supabase
     .from("contacts")
     .select("id")
     .eq("user_id", userId)
-    .in("stage", [...QUEUE_ELIGIBLE_STAGES])
-    .eq("insights_enabled", true)
+    .not("stage", "in", `(${TERMINAL_STAGES.join(",")})`)
     .not("bonzo_prospect_id", "is", null);
 
   let enqueued = 0;

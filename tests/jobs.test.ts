@@ -194,46 +194,91 @@ describe("refresh_cache cost guard", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
+    // doMock registrations survive resetModules, so a mock registered by one
+    // test would otherwise apply to every test after it. Only the D1 test
+    // mocks the classifier, and an un-stubbed return value crashes the tests
+    // that legitimately expect it to run.
+    vi.doUnmock("@/lib/insights/lead-state");
   });
 
   /**
-   * Phase 7's stage switch, proved at the handler rather than the constant.
+   * Phase 8 D1, proved at the handler rather than the constant.
    *
-   * refresh_cache gates on isQueueEligible, so after QUEUE_ELIGIBLE_STAGES
-   * moved to ['quoted_follow_up'] a Hot Lead must fall out of automation
-   * entirely — no Bonzo fetch, no classification, no spend. This is what stops
-   * the engine working leads Eddie handles by hand.
+   * The decision the whole phase rests on: a hands-on lead now DOES get the
+   * free Bonzo read, because the Today screen cannot say whose move a Needs
+   * Quote lead is without knowing the direction of the last message — and it
+   * must still cost nothing. One GET, watermarks written, no classification,
+   * no analysis, no workflow evaluation, no spend.
+   *
+   * Phase 7's version of this test asserted the opposite (not even the free
+   * call), which was correct while the sweep only covered one stage. The
+   * guarantee that survives is the one about money, not the one about API
+   * calls.
    */
-  it("does nothing at all for a lead in a hands-on stage", async () => {
+  it("reads Bonzo but spends nothing for a lead in a hands-on stage", async () => {
     const analyzeProspect = vi.fn();
-    const getCommunicationHistory = vi.fn();
+    const classifyLeadState = vi.fn();
+    const getProspect = vi.fn();
+    const getProspectNotes = vi.fn();
+    // Brand new messages, in both directions, and no cached analysis — the
+    // state every newly-swept lead is in, and the one the old `!hasNew &&
+    // cache?.ai_analysis` shape would have sent straight to the classifier.
+    const getCommunicationHistory = vi.fn(async () => [
+      { created_at: "2026-08-21T10:00:00Z", direction: "outgoing" },
+      { created_at: "2026-08-22T10:00:00Z", direction: "incoming" },
+    ]);
 
     vi.doMock("@/lib/insights/analyze", () => ({ analyzeProspect }));
+    vi.doMock("@/lib/insights/lead-state", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/insights/lead-state")>()),
+      classifyLeadState,
+    }));
     vi.doMock("@/lib/bonzo/client", async (importOriginal) => ({
       ...(await importOriginal<typeof import("@/lib/bonzo/client")>()),
       getCommunicationHistory,
+      getProspect,
+      getProspectNotes,
     }));
 
     const { refreshCache } = await import("@/lib/jobs/handlers");
 
+    const upserts: Record<string, unknown>[] = [];
+    const inserts: Record<string, unknown>[] = [];
     const supabase = {
-      from() {
+      from(table: string) {
+        if (table === "jobs") {
+          return {
+            insert: async (payload: Record<string, unknown>) => {
+              inserts.push(payload);
+              return { error: null };
+            },
+          };
+        }
         return {
           select: () => ({
             eq: () => ({
               maybeSingle: async () => ({
-                data: {
-                  id: "contact-1",
-                  user_id: "user-1",
-                  bonzo_prospect_id: 5150,
-                  bonzo_email: "d@example.com",
-                  insights_enabled: true,
-                  stage: "hot_lead",
-                },
+                data:
+                  table === "contacts"
+                    ? {
+                        id: "contact-1",
+                        user_id: "user-1",
+                        bonzo_prospect_id: 5150,
+                        bonzo_email: "d@example.com",
+                        insights_enabled: true,
+                        stage: "needs_quote",
+                      }
+                    : // No cache row at all: this lead has never been swept.
+                      { data: null, error: null }.data,
                 error: null,
               }),
             }),
           }),
+          upsert: async (payload: Record<string, unknown>) => {
+            upserts.push(payload);
+            return { error: null };
+          },
+          update: () => ({ eq: async () => ({ error: null }) }),
         };
       },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -244,10 +289,56 @@ describe("refresh_cache cost guard", () => {
       job_type: "refresh_cache",
     });
 
+    // The free half ran.
+    expect(getCommunicationHistory).toHaveBeenCalledTimes(1);
+    expect(upserts).toHaveLength(1);
+    expect(upserts[0].last_inbound_at).toBe("2026-08-22T10:00:00.000Z");
+    expect(upserts[0].last_outbound_at).toBe("2026-08-21T10:00:00.000Z");
+    expect(upserts[0].last_message_at).toBe("2026-08-22T10:00:00.000Z");
+
+    // The expensive half did not, despite genuinely new messages.
     expect(result.usedModel).toBe(false);
     expect(analyzeProspect).not.toHaveBeenCalled();
-    // Not even the free call — a hands-on lead is not refreshed at all.
+    expect(classifyLeadState).not.toHaveBeenCalled();
+    expect(getProspect).not.toHaveBeenCalled();
+    expect(getProspectNotes).not.toHaveBeenCalled();
+    // Not even the follow-on work a new inbound triggers for an eligible lead.
+    expect(inserts).toEqual([]);
+  });
+
+  it("costs nothing at all for a terminal lead — not even the free call", async () => {
+    const getCommunicationHistory = vi.fn();
+    vi.doMock("@/lib/insights/analyze", () => ({ analyzeProspect: vi.fn() }));
+    vi.doMock("@/lib/bonzo/client", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/bonzo/client")>()),
+      getCommunicationHistory,
+    }));
+
+    const { refreshCache } = await import("@/lib/jobs/handlers");
+
+    const supabase = {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: async () => ({
+              data: {
+                id: "contact-1",
+                user_id: "user-1",
+                bonzo_prospect_id: 5150,
+                insights_enabled: true,
+                stage: "funded",
+              },
+              error: null,
+            }),
+          }),
+        }),
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+
+    const result = await refreshCache(supabase, { ...job(), job_type: "refresh_cache" });
     expect(getCommunicationHistory).not.toHaveBeenCalled();
+    expect(result.usedModel).toBe(false);
   });
 
   it("makes zero model calls when no new messages arrived", async () => {
@@ -269,7 +360,7 @@ describe("refresh_cache cost guard", () => {
 
     const { refreshCache } = await import("@/lib/jobs/handlers");
 
-    const updated: Record<string, unknown>[] = [];
+    const upserted: Record<string, unknown>[] = [];
     const supabase = {
       from(table: string) {
         return {
@@ -300,11 +391,11 @@ describe("refresh_cache cost guard", () => {
               }),
             };
           },
-          update(payload: Record<string, unknown>) {
-            updated.push(payload);
-            return { eq: async () => ({ error: null }) };
+          update: () => ({ eq: async () => ({ error: null }) }),
+          upsert: async (payload: Record<string, unknown>) => {
+            upserted.push(payload);
+            return { error: null };
           },
-          upsert: async () => ({ error: null }),
         };
       },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -319,8 +410,10 @@ describe("refresh_cache cost guard", () => {
     expect(getProspectNotes).not.toHaveBeenCalled();
     expect(getProspect).not.toHaveBeenCalled();
     expect(result.usedModel).toBe(false);
-    // It still records that it looked, so the watermark stays fresh.
-    expect(updated[0]).toHaveProperty("last_synced_at");
+    // It still records that it looked, so the watermark stays fresh. Written
+    // by upsert rather than update since D1: a lead the sweep has only just
+    // started covering has no cache row, and an update would write nothing.
+    expect(upserted[0]).toHaveProperty("last_synced_at");
   });
 
   it("does call the model when a new message did arrive", async () => {
@@ -392,7 +485,7 @@ describe("refresh_cache cost guard", () => {
     expect(result.usedModel).toBe(true);
   });
 
-  it("skips a lead that is no longer an enrolled hot lead, without any API call", async () => {
+  it("skips a lead closed out since the job was enqueued, without any API call", async () => {
     const getCommunicationHistory = vi.fn();
     vi.doMock("@/lib/insights/analyze", () => ({ analyzeProspect: vi.fn() }));
     vi.doMock("@/lib/bonzo/client", async (importOriginal) => ({

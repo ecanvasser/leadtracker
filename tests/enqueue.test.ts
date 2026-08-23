@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { sweepRefreshJobs, REFRESH_SWEEP_INTERVAL_MS } from "@/lib/jobs/enqueue";
-import { QUEUE_ELIGIBLE_STAGES } from "@/types/db";
+import { PIPELINE_STAGES, TERMINAL_STAGES } from "@/types/db";
 
 /**
  * Stub covering the four tables a sweep touches.
@@ -20,7 +20,7 @@ function stub(opts: {
 }) {
   const inserts: Record<string, unknown>[] = [];
   const updates: Record<string, unknown>[] = [];
-  const stageFilters: string[][] = [];
+  const notFilters: string[][] = [];
 
   const client = {
     from(table: string) {
@@ -52,18 +52,20 @@ function stub(opts: {
         };
       }
       if (table === "contacts") {
-        // .select().eq(user_id).in(stage).eq(insights_enabled).not(prospect_id)
-        // The stage filter is a membership test against QUEUE_ELIGIBLE_STAGES,
-        // so `stages` records what the sweep actually asked for.
+        // .select().eq(user_id).not(stage, in, ...).not(bonzo_prospect_id)
+        // D1 widened the sweep from a stage membership test to an exclusion of
+        // the two terminal stages, so `notFilters` records both `not` calls in
+        // the order they were made.
         return {
           select: () => ({
             eq: () => ({
-              in: (_col: string, values: readonly string[]) => {
-                stageFilters.push([...values]);
+              not: (col: string, op: string, value: string) => {
+                notFilters.push([col, op, value]);
                 return {
-                  eq: () => ({
-                    not: async () => ({ data: opts.contacts ?? [], error: null }),
-                  }),
+                  not: async (c2: string, o2: string, v2: string) => {
+                    notFilters.push([c2, o2, v2]);
+                    return { data: opts.contacts ?? [], error: null };
+                  },
                 };
               },
             }),
@@ -84,7 +86,7 @@ function stub(opts: {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
 
-  return { client, inserts, updates, stageFilters };
+  return { client, inserts, updates, notFilters };
 }
 
 // 2026-08-20 17:00 UTC = 10:00 Pacific — inside working hours.
@@ -105,15 +107,39 @@ describe("sweepRefreshJobs", () => {
     expect(inserts.every((i) => i.job_type === "refresh_cache")).toBe(true);
   });
 
-  // D1 regression guard. The sweep must ask the database for exactly the
-  // stages QUEUE_ELIGIBLE_STAGES names — no more (a stage that should not be
-  // worked gets swept) and no fewer (a stage that should be silently stops).
-  it("filters on QUEUE_ELIGIBLE_STAGES, not a hardcoded stage", async () => {
-    const { client, stageFilters } = stub({ contacts: [{ id: "c1" }] });
+  /*
+   * Phase 8 D1 regression guard, replacing the Phase 7 one.
+   *
+   * The sweep used to ask for exactly QUEUE_ELIGIBLE_STAGES, which Phase 7
+   * narrowed to a single stage — so one lead was being refreshed and the
+   * Today screen could not tell whose move any of the others were. It now
+   * excludes only the two terminal stages, and derives that list from
+   * TERMINAL_STAGES rather than naming them, so a new terminal stage cannot
+   * quietly start being swept.
+   */
+  it("sweeps every non-terminal stage, excluded by TERMINAL_STAGES", async () => {
+    const { client, notFilters } = stub({ contacts: [{ id: "c1" }] });
     await sweepRefreshJobs(client, "u1", DURING_WORK);
 
-    expect(stageFilters).toHaveLength(1);
-    expect([...stageFilters[0]].sort()).toEqual([...QUEUE_ELIGIBLE_STAGES].sort());
+    expect(notFilters).toHaveLength(2);
+
+    const [col, op, value] = notFilters[0];
+    expect(col).toBe("stage");
+    expect(op).toBe("in");
+    const excluded = value.replace(/[()]/g, "").split(",");
+    expect([...excluded].sort()).toEqual([...TERMINAL_STAGES].sort());
+
+    // Every stage the board and the Today screen actually use survives it.
+    for (const stage of PIPELINE_STAGES) {
+      expect(excluded).not.toContain(stage);
+    }
+  });
+
+  it("still requires a linked Bonzo prospect — there is nothing to read without one", async () => {
+    const { client, notFilters } = stub({ contacts: [{ id: "c1" }] });
+    await sweepRefreshJobs(client, "u1", DURING_WORK);
+
+    expect(notFilters[1]).toEqual(["bonzo_prospect_id", "is", null]);
   });
 
   // Gating lives in the worker, not the cron expression: pg_cron runs in the

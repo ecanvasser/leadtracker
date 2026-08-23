@@ -8,13 +8,14 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { isQueueEligible, type Contact } from "@/types/db";
+import { TERMINAL_STAGES, isQueueEligible, type Contact } from "@/types/db";
 import {
   getCommunicationHistory,
   getProspectNotes,
   getProspect,
   getMortgageFields,
   isInbound,
+  isOutbound,
   type BonzoCommunication,
   type BonzoProspect,
 } from "@/lib/bonzo/client";
@@ -91,19 +92,36 @@ export const refreshCache: JobHandler = async (supabase, job) => {
   if (contactErr) throw contactErr;
   if (!contact) return { summary: "contact gone", usedModel: false };
 
-  // Enrollment or stage may have changed since the job was enqueued. Not an
-  // error — just nothing to do.
-  if (!contact.insights_enabled || !isQueueEligible(contact.stage)) {
-    return { summary: "not an enrolled lead in a queue-eligible stage", usedModel: false };
-  }
   if (!contact.bonzo_prospect_id) {
     return { summary: "no linked Bonzo prospect", usedModel: false };
   }
 
+  // Adverse and Funded are off the board, off the Today screen, and not worth
+  // a Bonzo call. The sweep already excludes them; this covers a job enqueued
+  // before the lead was closed out.
+  if ((TERMINAL_STAGES as readonly string[]).includes(contact.stage)) {
+    return { summary: `terminal stage (${contact.stage})`, usedModel: false };
+  }
+
+  /*
+   * D1 widened this job from Quoted – Follow Up to every non-terminal stage,
+   * so lib/turn/ can tell whose move a Hot Lead or a Needs Quote lead is.
+   * Answering that needs one fact — the direction of the last message — and
+   * nothing else.
+   *
+   * `eligible` is the seam between the two halves of the job. Everything
+   * below it up to the watermark write runs for every lead and costs one
+   * Bonzo GET. Everything after it — classification, call scanning, reply
+   * drafting, workflow evaluation — stays gated on Quoted – Follow Up exactly
+   * as before. Phase 8 is meant to add zero AI cost outside the quoted-window
+   * drafting, and this line is where that holds.
+   */
+  const eligible = contact.insights_enabled && isQueueEligible(contact.stage);
+
   const { data: cache } = await supabase
     .from("insights_cache")
     .select(
-      "ai_analysis, last_message_at, last_inbound_at, bonzo_prospect_data, lead_state, lead_state_at, calls_scanned_through"
+      "ai_analysis, last_message_at, last_inbound_at, last_outbound_at, bonzo_prospect_data, lead_state, lead_state_at, calls_scanned_through"
     )
     .eq("contact_id", contactId)
     .maybeSingle();
@@ -113,14 +131,66 @@ export const refreshCache: JobHandler = async (supabase, job) => {
   const newest = newestMessageAt(communications);
   const hasNew = hasNewMessages(communications, cache?.last_message_at);
 
-  if (!hasNew && cache?.ai_analysis) {
-    // Nothing changed. Record that we looked and stop before the model.
-    await supabase
-      .from("insights_cache")
-      .update({ last_synced_at: new Date().toISOString() })
-      .eq("contact_id", contactId);
+  // An inbound reply is the highest-value signal in the system. It is tracked
+  // separately from last_message_at because an outbound send moves that
+  // watermark, and a reply arriving afterwards would otherwise be missed.
+  const newestInbound = newestMessageAt(
+    communications.filter((c) => isInbound(c.direction))
+  );
+  const previousInbound = cache?.last_inbound_at
+    ? new Date(cache.last_inbound_at).getTime()
+    : null;
+  const hasNewInbound =
+    newestInbound !== null &&
+    (previousInbound === null || newestInbound.getTime() > previousInbound);
+
+  // The outbound side, promoted out of lead_state to a column of its own.
+  // lead_state is written by the classifier, which stays gated below, so a
+  // Needs Quote lead would otherwise have an inbound watermark and no
+  // outbound one — and whose-turn is a comparison between the two.
+  const newestOutbound = newestMessageAt(
+    communications.filter((c) => isOutbound(c.direction))
+  );
+
+  const watermarks = {
+    last_synced_at: new Date().toISOString(),
+    last_message_at: newest ? newest.toISOString() : null,
+    last_inbound_at: newestInbound ? newestInbound.toISOString() : null,
+    last_outbound_at: newestOutbound ? newestOutbound.toISOString() : null,
+  };
+
+  /*
+   * Cost rule C1, restated for a sweep that now covers every stage: a poll
+   * that finds nothing must make zero model calls.
+   *
+   * One evaluation, on the shared path, before anything branches. The
+   * `!cache?.ai_analysis` term preserves the original behaviour — a lead that
+   * has never been analysed is worth a first look even with no new messages —
+   * and it is also why the eligibility test has to be part of this expression
+   * rather than a separate early return above it. Every newly-swept lead has
+   * a null ai_analysis by definition, so a widened sweep that kept the old
+   * `!hasNew && cache?.ai_analysis` shape would have sent all of them
+   * straight into the classifier on the first tick.
+   */
+  const needsModelWork = eligible && (hasNew || !cache?.ai_analysis);
+
+  if (!needsModelWork) {
+    // Record what we saw and stop before the model. The upsert rather than an
+    // update is deliberate: a lead the sweep has only just started covering
+    // has no cache row yet, and an update would silently write nothing.
+    await supabase.from("insights_cache").upsert(
+      {
+        contact_id: contactId,
+        user_id: contact.user_id,
+        bonzo_communication: communications,
+        ...watermarks,
+      },
+      { onConflict: "contact_id" }
+    );
     return {
-      summary: `no new messages (${communications.length} total)`,
+      summary: eligible
+        ? `no new messages (${communications.length} total)`
+        : `watermarks only (${communications.length} messages, ${contact.stage})`,
       usedModel: false,
     };
   }
@@ -148,20 +218,8 @@ export const refreshCache: JobHandler = async (supabase, job) => {
     );
   }
 
-  // An inbound reply is the highest-value signal in the system. It is tracked
-  // separately from last_message_at because an outbound send moves that
-  // watermark, and a reply arriving afterwards would otherwise be missed.
-  const newestInbound = newestMessageAt(
-    communications.filter((c) => isInbound(c.direction))
-  );
-  const previousInbound = cache?.last_inbound_at
-    ? new Date(cache.last_inbound_at).getTime()
-    : null;
-  const hasNewInbound =
-    newestInbound !== null &&
-    (previousInbound === null || newestInbound.getTime() > previousInbound);
-
-  // Both model calls sit behind the hasNew branch above. A refresh that finds
+  // Both model calls sit behind the needsModelWork branch above. A refresh
+  // that finds
   // nothing new has already returned without reaching either.
   const timeZone = await getUserTimezone(contact.user_id, supabase);
 
@@ -238,9 +296,7 @@ export const refreshCache: JobHandler = async (supabase, job) => {
           }
         : {}),
       generated_at: new Date().toISOString(),
-      last_synced_at: new Date().toISOString(),
-      last_message_at: newest ? newest.toISOString() : null,
-      last_inbound_at: newestInbound ? newestInbound.toISOString() : null,
+      ...watermarks,
       calls_scanned_through: newest ? newest.toISOString() : null,
     },
     { onConflict: "contact_id" }
