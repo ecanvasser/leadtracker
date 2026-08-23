@@ -72,12 +72,20 @@ export async function readDraftSettings(
 }
 
 /**
- * The handoff threshold, which is also the far edge of the drafting window.
+ * The far edge of the drafting window, in days.
  *
- * Read from the handoff workflow rather than duplicated as a constant: the
- * window and the handoff are the same boundary seen from two sides, and if
- * Eddie widens the rule to three days the drafting window has to follow. Two
- * numbers that must agree, stored separately, will disagree.
+ * This used to be the handoff threshold, and the two were the same boundary
+ * seen from two sides. Since leads are enrolled in "Responded (NEW Quoted)"
+ * on arrival rather than handed off later, the boundary that actually matters
+ * is different: it is how long that campaign waits before its first touch —
+ * two days — because after that, Bonzo is talking to the lead and a personal
+ * draft would be the second uncoordinated voice.
+ *
+ * Still read from the handoff workflow's `days`, which is now the only place
+ * that number is written down and is editable on the rules page. That is a
+ * proxy rather than the real source, and the real source is a Bonzo campaign
+ * setting this app cannot read. Worth promoting to its own setting if the
+ * campaign's delay ever changes; harmless while both are two.
  */
 export async function windowDaysFor(
   supabase: SupabaseClient,

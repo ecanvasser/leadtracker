@@ -174,14 +174,14 @@ export function RulesClient() {
             onToggleExpand={() => setExpanded(expanded === w.id ? null : w.id)}
             onSetMode={setMode}
             onPatch={patch}
-            title="Park them while I work them"
+            title="Enrol on quote"
             sentence={
               <>
                 When a lead enters <b>Quoted – Follow Up</b>, move them to{" "}
                 <b>{campaignName(w)}</b>.
               </>
             }
-            why="That campaign sends nothing. It stops Bonzo dripping a lead the same afternoon you're working them — two uncoordinated touches is the thing that reads as automated."
+            why="That campaign waits two days before its first touch, so enrolling straight away gives you the window to work them by hand without Bonzo talking over you — and without the wait being served twice."
           />
         ))}
 
@@ -196,6 +196,7 @@ export function RulesClient() {
             onPatch={patch}
             title="Hand off after silence"
             editableDays
+            redundant
             sentence={
               <>
                 When they haven&rsquo;t replied in{" "}
@@ -203,7 +204,7 @@ export function RulesClient() {
                 <b>{campaignName(w)}</b>.
               </>
             }
-            why="Only fires when the classifier still reads no reply at all. A price objection or a soft no is a live conversation, and it stays yours."
+            why="Superseded by enrolling on quote — a lead is already in that campaign by the time this would fire. Kept, and switched off, in case you ever want a second campaign later in the window."
           />
         ))}
 
@@ -256,6 +257,7 @@ function RuleCard({
   sentence,
   why,
   editableDays,
+  redundant,
 }: {
   workflow: Workflow;
   runs: WorkflowRun[];
@@ -267,6 +269,8 @@ function RuleCard({
   sentence: React.ReactNode;
   why: string;
   editableDays?: boolean;
+  /** Superseded by another rule; shown, but visibly not doing work. */
+  redundant?: boolean;
 }) {
   const mode = workflowMode(w);
   const [days, setDays] = useState(String(w.trigger_config?.days ?? ""));
@@ -287,10 +291,25 @@ function RuleCard({
   }
 
   return (
-    <div className="rounded-xl border border-border/60 p-4">
+    <div
+      className={`rounded-xl border border-border/60 p-4 ${redundant ? "opacity-60" : ""}`}
+    >
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <h2 className="text-sm font-semibold">{title}</h2>
+          <h2 className="flex items-center gap-2 text-sm font-semibold">
+            {title}
+            {/*
+              Said on the card rather than left to be inferred from the Off
+              badge. "Off" and "off because something else does this now" are
+              different facts, and only one of them means the rule is safe to
+              leave alone.
+            */}
+            {redundant && (
+              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground">
+                superseded
+              </span>
+            )}
+          </h2>
           <p className="mt-1 text-sm">{sentence}</p>
           <p className="mt-1.5 text-xs text-muted-foreground">{why}</p>
         </div>

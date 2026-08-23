@@ -703,3 +703,57 @@ describe("needsApproval", () => {
     if (out.fired) expect(out.plannedStatus).toBe("dry_run");
   });
 });
+
+/*
+ * Enrol on quote.
+ *
+ * "Responded (NEW Quoted)" does not touch a prospect until day 3 — the
+ * two-day wait is inside the sequence. Parking first and handing off after two
+ * quiet days made that wait be served twice, so a lead heard nothing from
+ * Bonzo for four days where Eddie wanted two.
+ *
+ * Asserted against the migration text because the rules are data, not code:
+ * the engine has no opinion about which campaign a rule targets, so the only
+ * place this decision exists is the file that writes it.
+ */
+describe("the enrol-on-quote migration", () => {
+  const sql = readFileSync(
+    resolve(process.cwd(), "supabase/migrations/20260823000006_enroll_on_quote.sql"),
+    "utf8"
+  );
+
+  it("repoints the stage_changed rule at the sending campaign", () => {
+    expect(sql).toContain("198426");
+    expect(sql).toMatch(/trigger_type = 'stage_changed'/);
+    // Guarded on the old id, so a rule already repointed by hand is untouched.
+    expect(sql).toContain("'122735'");
+  });
+
+  it("revokes auto-approve, because the reason for granting it is gone", () => {
+    /*
+     * D6 granted it on one argument: the target could not message anyone. A
+     * rule that enrols a lead into a sending campaign without being asked is
+     * exactly what requires_approval exists for.
+     */
+    expect(sql).toMatch(/set auto_approve = false/);
+  });
+
+  it("switches the now-redundant handoff off rather than deleting it", () => {
+    expect(sql).toMatch(/set enabled = false/);
+    expect(sql).not.toMatch(/delete\s+from\s+workflows/i);
+  });
+
+  it("never enables anything", () => {
+    // The one thing this file must not do. Both rules stay where Eddie put
+    // them on the ladder.
+    expect(sql).not.toMatch(/set enabled = true/);
+    expect(sql).not.toMatch(/set dry_run = false/);
+  });
+
+  it("says out loud what the change costs", () => {
+    // The D4 suppression lived on the handoff rule and kept engaged leads out
+    // of a sending campaign. Enrolling on arrival happens before anyone can
+    // reply, so that protection no longer has anything to attach to.
+    expect(sql).toMatch(/stop-on-response/);
+  });
+});
