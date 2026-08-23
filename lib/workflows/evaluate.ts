@@ -25,7 +25,7 @@
 import { isQueueEligible, type AllStages } from "@/types/db";
 import { matchTrigger, type TriggerMatch } from "@/lib/workflows/triggers";
 import type { ActionType, LeadFacts, Workflow } from "@/lib/workflows/types";
-import { workflowMode } from "@/lib/workflows/types";
+import { needsApproval, workflowMode } from "@/lib/workflows/types";
 
 /** Actions that cause a message to reach the prospect. */
 export const MESSAGE_CAUSING_ACTIONS: readonly ActionType[] = [
@@ -136,6 +136,26 @@ export function conditionsPass(
     }
     if (facts.loanAmount < c.min_loan_amount) {
       return { pass: false, reason: `loan amount below ${c.min_loan_amount}` };
+    }
+  }
+  /*
+   * D4. A whitelist, and an unclassified lead fails it.
+   *
+   * That asymmetry is deliberate. The only rule carrying this condition is
+   * the handoff, and firing it on a lead whose reaction to the quote has
+   * never been read would be acting on an absence of evidence in the one
+   * direction the spec says is worse. A lead in Quoted – Follow Up is
+   * classified twice a day, so a null here means something is wrong rather
+   * than that the lead is quiet — and the right response to that is to leave
+   * the lead for Eddie.
+   */
+  if (c.pitch_response?.length) {
+    const actual = facts.leadState?.pitch_response;
+    if (!actual) {
+      return { pass: false, reason: "lead has no classification yet" };
+    }
+    if (!c.pitch_response.includes(actual)) {
+      return { pass: false, reason: `pitch response ${actual} is not in the firing set` };
     }
   }
   if (c.max_loan_amount != null) {
@@ -265,7 +285,7 @@ export function evaluateWorkflows(input: EvaluateInput): EvaluationOutcome {
       plannedStatus:
         mode === "dry_run"
           ? "dry_run"
-          : workflow.requires_approval
+          : needsApproval(workflow)
             ? "pending_approval"
             : "executed",
       considered,

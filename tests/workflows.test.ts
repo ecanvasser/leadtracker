@@ -9,7 +9,7 @@ import {
   causesMessage,
 } from "@/lib/workflows/evaluate";
 import { matchTrigger, daysSince } from "@/lib/workflows/triggers";
-import { workflowMode, type LeadFacts, type Workflow } from "@/lib/workflows/types";
+import { needsApproval, workflowMode, type LeadFacts, type Workflow } from "@/lib/workflows/types";
 import type { LeadState } from "@/lib/insights/lead-state";
 
 const NOW = new Date("2026-08-22T18:00:00Z");
@@ -28,6 +28,7 @@ function workflow(over: Partial<Workflow> = {}): Workflow {
     action_type: "add_to_bonzo_campaign",
     action_config: { campaign_id: 43998 },
     requires_approval: true,
+    auto_approve: false,
     priority: 100,
     created_at: "2026-08-01T00:00:00Z",
     updated_at: "2026-08-01T00:00:00Z",
@@ -560,5 +561,145 @@ describe("seed workflows", () => {
     // D4: Eddie moving them to App In is the signal to stop chasing.
     const converted = facts({ stage: "app_in", stageChangedAt: ago(2), lastInboundAt: ago(5) });
     expect(evaluate({ workflows: seeds, facts: converted }).fired).toBe(false);
+  });
+});
+
+/*
+ * Phase 8 D4 — the handoff must not fire when the two-day window produced a
+ * real response.
+ *
+ * This is the highest-stakes condition in the app. The rule messages a client
+ * under Eddie's name, and the failure modes are asymmetric in the way D4
+ * describes: dumping an engaged lead into a generic campaign is much worse
+ * than leaving a dead one to be handed off by hand.
+ */
+describe("handoff suppression on pitch_response", () => {
+  const suppressed = workflow({
+    conditions: { pitch_response: ["no_response"] },
+  });
+
+  it("fires on no_response, which is the whole point of the rule", () => {
+    const out = evaluate({
+      workflows: [suppressed],
+      facts: facts({ leadState: leadState({ pitch_response: "no_response" }) }),
+    });
+    expect(out.fired).toBe(true);
+  });
+
+  it.each([
+    "soft_no",
+    "price_objection",
+    "timing_objection",
+    "competitor",
+    "needs_info",
+    "positive_intent",
+    "converted_signal",
+  ] as const)("does not fire on %s — that is a live conversation", (response) => {
+    const out = evaluate({
+      workflows: [suppressed],
+      facts: facts({ leadState: leadState({ pitch_response: response }) }),
+    });
+    expect(out.fired).toBe(false);
+  });
+
+  /*
+   * An unclassified lead fails the condition rather than passing it. Firing on
+   * a lead whose reaction to the quote has never been read would be acting on
+   * an absence of evidence in the one direction the spec says is worse.
+   */
+  it("does not fire on a lead with no classification at all", () => {
+    const out = evaluate({
+      workflows: [suppressed],
+      facts: facts({ leadState: null }),
+    });
+    expect(out.fired).toBe(false);
+  });
+
+  it("says why it did not fire, rather than going quiet", () => {
+    const out = evaluate({
+      workflows: [suppressed],
+      facts: facts({ leadState: leadState({ pitch_response: "price_objection" }) }),
+    });
+    const considered = out.considered.find((c) => c.workflowId === suppressed.id);
+    expect(considered?.reason ?? "").toMatch(/price_objection/);
+  });
+
+  it("can be widened without touching code", () => {
+    const wider = workflow({
+      conditions: { pitch_response: ["no_response", "soft_no"] },
+    });
+    const out = evaluate({
+      workflows: [wider],
+      facts: facts({ leadState: leadState({ pitch_response: "soft_no" }) }),
+    });
+    expect(out.fired).toBe(true);
+  });
+
+  /*
+   * The Phase 7 evidence gate stays and takes precedence. It downgrades a
+   * hand_off recommendation to follow_up when the quote backing it was not
+   * found in the thread — but the 2-day rule fires on elapsed time, not on the
+   * recommendation, so what actually protects a lead here is that a discarded
+   * read falls back to no_response at low confidence. That fallback is what
+   * makes this condition safe rather than a second guess at the same thing.
+   */
+  it("still fires for a lead whose read was discarded back to no_response", () => {
+    const out = evaluate({
+      workflows: [suppressed],
+      facts: facts({
+        leadState: leadState({
+          pitch_response: "no_response",
+          evidence: null,
+          evidence_confidence: "low",
+        }),
+      }),
+    });
+    expect(out.fired).toBe(true);
+  });
+});
+
+/*
+ * Phase 8 D6 — auto_approve, and why it is a second flag.
+ */
+describe("needsApproval", () => {
+  it("asks when the action is consequential and the rule is not trusted", () => {
+    expect(needsApproval({ requires_approval: true, auto_approve: false })).toBe(true);
+  });
+
+  it("does not ask once the rule is trusted", () => {
+    expect(needsApproval({ requires_approval: true, auto_approve: true })).toBe(false);
+  });
+
+  it("does not ask when the action never needed approval", () => {
+    expect(needsApproval({ requires_approval: false, auto_approve: false })).toBe(false);
+  });
+
+  it("plans an auto-approved live rule straight to executed", () => {
+    const out = evaluate({
+      workflows: [workflow({ dry_run: false, requires_approval: true, auto_approve: true })],
+    });
+    expect(out.fired).toBe(true);
+    if (out.fired) expect(out.plannedStatus).toBe("executed");
+  });
+
+  it("still plans a live rule that is not trusted to pending_approval", () => {
+    const out = evaluate({
+      workflows: [workflow({ dry_run: false, requires_approval: true, auto_approve: false })],
+    });
+    expect(out.fired).toBe(true);
+    if (out.fired) expect(out.plannedStatus).toBe("pending_approval");
+  });
+
+  /*
+   * Dry run outranks trust. A rule Eddie is still watching must not start
+   * acting because he also marked it auto-approve — the ladder is the outer
+   * control and approval is the inner one.
+   */
+  it("keeps an auto-approved rule in dry run harmless", () => {
+    const out = evaluate({
+      workflows: [workflow({ dry_run: true, requires_approval: true, auto_approve: true })],
+    });
+    expect(out.fired).toBe(true);
+    if (out.fired) expect(out.plannedStatus).toBe("dry_run");
   });
 });

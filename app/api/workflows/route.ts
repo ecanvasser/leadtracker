@@ -90,6 +90,7 @@ export async function POST(request: NextRequest) {
       action_type: b.action_type,
       action_config: b.action_config ?? {},
       requires_approval: b.requires_approval ?? true,
+      auto_approve: b.auto_approve ?? false,
       priority: b.priority ?? 100,
     })
     .select("*")

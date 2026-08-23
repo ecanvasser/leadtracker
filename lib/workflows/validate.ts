@@ -163,7 +163,12 @@ export function validateWorkflow(body: unknown): string | null {
     if (priority < 0 || priority > 10_000) return "priority must be between 0 and 10000";
   }
 
-  for (const flag of ["enabled", "dry_run", "requires_approval"] as const) {
+  for (const flag of [
+    "enabled",
+    "dry_run",
+    "requires_approval",
+    "auto_approve",
+  ] as const) {
     if (body[flag] !== undefined && typeof body[flag] !== "boolean") {
       return `${flag} must be true or false`;
     }
@@ -179,7 +184,10 @@ export function validateWorkflow(body: unknown): string | null {
   if (
     body.enabled === true &&
     body.dry_run === false &&
-    body.requires_approval === false &&
+    // auto_approve reaches the same place by a different door, so the
+    // confirmation has to cover both. A rule that requires approval and then
+    // approves itself is unattended in exactly the sense this guard is about.
+    (body.requires_approval === false || body.auto_approve === true) &&
     actionType === "add_to_bonzo_campaign" &&
     body.acknowledge_unattended !== true
   ) {

@@ -20,6 +20,7 @@ function workflow(over: Partial<Workflow> = {}): Workflow {
     action_type: "add_to_bonzo_campaign",
     action_config: { campaign_id: 43998 },
     requires_approval: false,
+    auto_approve: false,
     priority: 100,
     created_at: "2026-08-01T00:00:00Z",
     updated_at: "2026-08-01T00:00:00Z",

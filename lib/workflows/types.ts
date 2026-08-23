@@ -59,6 +59,18 @@ export interface WorkflowConditions {
   stage?: AllStages[];
   min_loan_amount?: number;
   max_loan_amount?: number;
+  /**
+   * Phase 8 D4. The classifier's read of what the lead did with the number,
+   * as a whitelist: the rule fires only when the current pitch_response is in
+   * this set.
+   *
+   * The handoff defaults to ['no_response'] alone. Any actual reply — even a
+   * price objection or a soft no — means a live conversation Eddie should
+   * work himself, and the failure modes are asymmetric: dumping an engaged
+   * lead into a generic campaign is much worse than leaving a dead one to be
+   * handed off by hand.
+   */
+  pitch_response?: PitchResponse[];
 }
 
 export interface Workflow {
@@ -73,6 +85,11 @@ export interface Workflow {
   action_type: ActionType;
   action_config: Record<string, unknown>;
   requires_approval: boolean;
+  /**
+   * Skips the approval card for this rule only. See D6 — the park rule earns
+   * it because its target campaign cannot message anyone.
+   */
+  auto_approve: boolean;
   priority: number;
   created_at: string;
   updated_at: string;
@@ -132,4 +149,19 @@ export type WorkflowMode = "off" | "dry_run" | "live";
 export function workflowMode(w: Pick<Workflow, "enabled" | "dry_run">): WorkflowMode {
   if (!w.enabled) return "off";
   return w.dry_run ? "dry_run" : "live";
+}
+
+/**
+ * Whether a firing of this rule has to wait for a tap.
+ *
+ * The two flags say different things and are both worth keeping.
+ * `requires_approval` is a property of the action — a campaign move is
+ * consequential and awkward to reverse. `auto_approve` is a statement about
+ * one rule Eddie has watched long enough to trust. Collapsing them would lose
+ * the first the moment he grants the second.
+ */
+export function needsApproval(
+  w: Pick<Workflow, "requires_approval" | "auto_approve">
+): boolean {
+  return w.requires_approval && !w.auto_approve;
 }

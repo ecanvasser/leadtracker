@@ -56,7 +56,13 @@ export async function PATCH(
    * and requiring a complete payload to flip a toggle is how a UI ends up
    * sending back a stale copy of everything else.
    */
-  const STATE_ONLY = ["enabled", "dry_run", "requires_approval", "priority"];
+  const STATE_ONLY = [
+    "enabled",
+    "dry_run",
+    "requires_approval",
+    "auto_approve",
+    "priority",
+  ];
   const keys = Object.keys(b);
   const isStateOnly = keys.length > 0 && keys.every((k) => STATE_ONLY.includes(k));
 
@@ -64,7 +70,12 @@ export async function PATCH(
     const invalid = validateWorkflow(body);
     if (invalid) return NextResponse.json({ error: invalid }, { status: 400 });
   } else {
-    for (const flag of ["enabled", "dry_run", "requires_approval"] as const) {
+    for (const flag of [
+      "enabled",
+      "dry_run",
+      "requires_approval",
+      "auto_approve",
+    ] as const) {
       if (b[flag] !== undefined && typeof b[flag] !== "boolean") {
         return NextResponse.json({ error: `${flag} must be true or false` }, { status: 400 });
       }
@@ -85,6 +96,7 @@ export async function PATCH(
     "action_type",
     "action_config",
     "requires_approval",
+    "auto_approve",
     "priority",
   ];
   for (const key of WRITABLE) {
