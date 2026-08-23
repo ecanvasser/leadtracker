@@ -42,6 +42,7 @@ function contact(over: Partial<Contact> = {}): Contact {
     bonzo_email: "d@example.com",
     insights_enabled: true,
     phone: null,
+    stage_changed_at: null,
     created_at: "2026-08-01T00:00:00Z",
     updated_at: "2026-08-01T00:00:00Z",
     ...over,

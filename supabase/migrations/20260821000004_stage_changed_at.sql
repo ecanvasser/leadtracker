@@ -40,6 +40,12 @@ comment on column contacts.stage_changed_at is
 create or replace function set_stage_changed_at()
 returns trigger
 language plpgsql
+-- security invoker + an empty search_path: Supabase's linter flags a mutable
+-- search_path on any function, because a caller who can set search_path could
+-- otherwise shadow an unqualified name the function relies on. This one only
+-- calls now(), which lives in pg_catalog and is always resolvable.
+security invoker
+set search_path = ''
 as $$
 begin
   -- Only a genuine stage change moves the clock. Assigning the same stage

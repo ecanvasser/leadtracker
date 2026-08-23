@@ -18,7 +18,7 @@ export default async function AdversePage() {
     .from("contacts")
     .select("*")
     .eq("stage", "adverse")
-    .order("updated_at", { ascending: false });
+    .order("stage_changed_at", { ascending: false });
 
   return (
     <AdverseTable

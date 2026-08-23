@@ -18,7 +18,7 @@ export default async function FundedPage() {
     .from("contacts")
     .select("*")
     .eq("stage", "funded")
-    .order("updated_at", { ascending: false });
+    .order("stage_changed_at", { ascending: false });
 
   return <FundedTable initialContacts={contacts ?? []} userId={userId} />;
 }

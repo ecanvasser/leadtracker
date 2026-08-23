@@ -129,6 +129,13 @@ export interface Contact {
   insights_enabled: boolean;
   /** Captured from Bonzo at enrollment; call reminders read it. See 3.4. */
   phone: string | null;
+  /**
+   * When the contact entered its current stage, maintained by a database
+   * trigger. Phase 7 needs it for days_since_pitch and the days_in_stage
+   * workflow trigger, and it is a better "when did this happen" than
+   * updated_at, which moves on any edit at all.
+   */
+  stage_changed_at: string | null;
   created_at: string;
   updated_at: string;
 }

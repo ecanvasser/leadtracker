@@ -73,7 +73,7 @@ export function buildFacts(input: {
     contactId: contact.id,
     stage: contact.stage,
     loanType: contact.loan_type,
-    stageChangedAt: (contact as Contact & { stage_changed_at?: string | null }).stage_changed_at ?? null,
+    stageChangedAt: contact.stage_changed_at,
     previousStage: input.previousStage,
     lastInboundAt: latest(isInbound),
     lastOutboundAt: latest(isOutbound),

@@ -24,6 +24,7 @@ function contact(overrides: Partial<Contact> = {}): Contact {
     bonzo_email: "dana@example.com",
     insights_enabled: true,
     phone: null,
+    stage_changed_at: null,
     created_at: "2026-08-20T16:00:00Z", // 09:00 PDT
     updated_at: "2026-08-20T16:00:00Z",
     ...overrides,

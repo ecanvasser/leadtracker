@@ -57,7 +57,7 @@ export function FundedTable({ initialContacts, userId }: FundedTableProps) {
             .from("contacts")
             .select("*")
             .eq("stage", "funded")
-            .order("updated_at", { ascending: false });
+            .order("stage_changed_at", { ascending: false });
           if (data) setContacts(data as Contact[]);
         }
       )
@@ -168,7 +168,14 @@ export function FundedTable({ initialContacts, userId }: FundedTableProps) {
                     {contact.notes || "—"}
                   </td>
                   <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">
-                    {new Date(contact.updated_at).toLocaleDateString("en-US", {
+                    {/*
+                      stage_changed_at, not updated_at. This column means
+                      "when did this happen", and updated_at moves on any edit
+                      — including the Phase 7 backfill, which reset it on every
+                      row. stage_changed_at is the actual moment the contact
+                      landed here.
+                    */}
+                    {new Date(contact.stage_changed_at ?? contact.updated_at).toLocaleDateString("en-US", {
                       month: "short",
                       day: "numeric",
                     })}
