@@ -16,6 +16,7 @@ import {
   handleTextMessage,
 } from "@/lib/telegram/commands";
 import { handlePause, handleResume } from "@/lib/telegram/workflow-handlers";
+import { handleToday } from "@/lib/telegram/today-handlers";
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
 
@@ -45,6 +46,10 @@ function getHandler(): (req: Request) => Promise<Response> {
 
   bot.command("start", handleStart);
   bot.command("help", handleHelp);
+  // 5.1 — the same three questions the Today screen answers, from the same
+  // function. Registered before the older flows for no reason other than
+  // that it is now the one Eddie will reach for first.
+  bot.command("today", handleToday);
   bot.command("todo", handleTodo);
   bot.command("add", handleAdd);
   bot.command("list", handleList);

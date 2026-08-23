@@ -1,6 +1,7 @@
 import { type Context } from "grammy";
 import { createServiceClient } from "@/lib/supabase/service";
 import { handleWorkflowCallback } from "@/lib/telegram/workflow-handlers";
+import { handleTodayCallback } from "@/lib/telegram/today-handlers";
 import { getUserIdByTelegramId, redeemLinkToken } from "@/lib/db/telegram";
 import { withSession, type SessionData } from "@/lib/telegram/session";
 import {
@@ -101,6 +102,7 @@ export async function handleStart(ctx: Context) {
 export async function handleHelp(ctx: Context) {
   await ctx.reply(
     "<b>Commands:</b>\n\n" +
+      "/today — Whose move is it: your move, overdue, waiting\n" +
       "/todo — View open tasks\n" +
       "/add — Add a new contact\n" +
       "/list — List contacts (optionally by stage)\n" +
@@ -281,6 +283,9 @@ async function callbackFlow(ctx: Context, session: SessionData, clear: Clear) {
   // Workflow approval taps. Checked alongside the queue's own callbacks; the
   // two use distinct prefixes so neither can swallow the other's.
   if (await handleWorkflowCallback(ctx)) return;
+  // Today card taps. Same reasoning: its own prefixes, answered before the
+  // contact-management flows below, which claim broad ones like "stage:".
+  if (await handleTodayCallback(ctx)) return;
   await ctx.answerCallbackQuery();
 
   const supabase = createServiceClient();
