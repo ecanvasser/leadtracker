@@ -20,6 +20,7 @@ export const CB = {
   send: "qs",
   edit: "qe",
   skip: "qk",
+  redraft: "qr",
   snoozeMenu: "qz",
   snoozeApply: "qza",
   back: "qb",
@@ -50,11 +51,15 @@ export interface ApprovalCardInput {
   lastInbound: { content: string; created_at: string } | null;
   bonzoProspectId: number | null;
   /**
-   * Phase 7 retirement: nothing sets this any more — the validator that
-   * produced it is gone. Kept on the card input so historical daily_queue rows
-   * that still carry a stored draft render the way they always did.
+   * Violations a draft still carries after its one corrective retry (6A.3).
+   * Written again since Phase 8 — the validator that produces them is back,
+   * narrowly, for the quoted window.
    */
   unvalidatedReasons?: string[];
+  /** Drafting is in dry run: the card shows the draft but cannot send it. */
+  readOnly?: boolean;
+  /** This card carries a generated draft, so Redraft applies. */
+  canRedraft?: boolean;
 }
 
 /**
@@ -166,6 +171,10 @@ export function approvalKeyboard(input: {
   queueItemId: string;
   actionType: "sms" | "email" | "call";
   bonzoProspectId: number | null;
+  /** Drafting is in dry run: show the draft, offer no way to send it. */
+  readOnly?: boolean;
+  /** There is a generated draft on this card that can be revised. */
+  canRedraft?: boolean;
 }): InlineKeyboard {
   const kb = new InlineKeyboard();
   const id = input.queueItemId;
@@ -174,13 +183,25 @@ export function approvalKeyboard(input: {
     // A call is never drafted or sent from here — only logged or deferred.
     kb.text("✅ Done", `${CB.send}:${id}`).text("⏰ Snooze", `${CB.snoozeMenu}:${id}`);
     kb.row().text("⏭ Skip", `${CB.skip}:${id}`);
+  } else if (input.readOnly) {
+    /*
+     * Dry run (6A / section 9). Eddie asked to see a few drafts he would have
+     * sent before any of them can actually send, so the card carries no Send
+     * and no Edit — Edit sends too. Skip stays, because a draft he does not
+     * want should still be dismissable rather than sitting pending forever.
+     */
+    kb.text("⏭ Dismiss", `${CB.skip}:${id}`);
   } else {
-    // Phase 7 retirement removed Redraft with the drafting subsystem. Edit
-    // stays: it pastes Eddie's own text verbatim, generates nothing, and with
-    // draft_message now always null it is the only way a message goes out
-    // from Telegram at all. Section 5 replaces these buttons.
     kb.text("✅ Send", `${CB.send}:${id}`).text("✏️ Edit", `${CB.edit}:${id}`);
-    kb.row().text("⏰ Snooze", `${CB.snoozeMenu}:${id}`).text("⏭ Skip", `${CB.skip}:${id}`);
+    if (input.canRedraft) {
+      // 6A.4. Only offered where there is a draft to revise — Redraft on an
+      // empty card would be a general-purpose drafting button, which is the
+      // thing section 7 rules out.
+      kb.row().text("🔄 Redraft", `${CB.redraft}:${id}`).text("⏭ Skip", `${CB.skip}:${id}`);
+      kb.row().text("⏰ Snooze", `${CB.snoozeMenu}:${id}`);
+    } else {
+      kb.row().text("⏰ Snooze", `${CB.snoozeMenu}:${id}`).text("⏭ Skip", `${CB.skip}:${id}`);
+    }
   }
 
   if (input.bonzoProspectId) {

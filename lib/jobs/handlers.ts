@@ -20,6 +20,7 @@ import {
   type BonzoProspect,
 } from "@/lib/bonzo/client";
 import { analyzeProspect } from "@/lib/insights/analyze";
+import { draftQuoted } from "@/lib/jobs/draft-quoted";
 import type { Job } from "@/lib/jobs/queue";
 import { classifyLeadState, shouldClassify, type LeadState } from "@/lib/insights/lead-state";
 import { getUserTimezone, localDate, leadAgeDays } from "@/lib/time";
@@ -567,6 +568,7 @@ export const INBOUND_REPLY_REASON = "They replied — respond";
  * rather than silently dropping it.
  */
 export const handlers: Partial<Record<Job["job_type"], JobHandler>> = {
+  draft_quoted: draftQuoted,
   refresh_cache: refreshCache,
   draft_reply: draftReply,
   morning_digest: morningDigest,

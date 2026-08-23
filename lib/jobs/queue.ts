@@ -21,6 +21,8 @@ export const JOB_TYPES = [
   "draft_reply",
   "extract_call_time",
   "morning_digest",
+  // Phase 8 6A. The only job that spends money on prose.
+  "draft_quoted",
 ] as const;
 
 export type JobType = (typeof JOB_TYPES)[number];

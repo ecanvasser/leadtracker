@@ -162,6 +162,23 @@ export async function sendQueueItem(
   const now = new Date().toISOString();
   const wasEdited = options.overrideBody !== undefined;
 
+  /*
+   * 6A.5 — capture the edits.
+   *
+   * When Eddie rewrites a draft, both versions are kept: what the model wrote
+   * and what he actually sent. Nothing acts on this and nothing should. The
+   * point is the diff — if the drafts need heavy editing again, this is the
+   * evidence for what is wrong with the prompt, and without it improving them
+   * would be a second round of guessing.
+   *
+   * Null when he sent the draft unchanged, so a non-null value always means a
+   * real edit rather than an equal pair to filter out later.
+   */
+  const originalDraft =
+    wasEdited && item.draft_message && item.draft_message.trim() !== body
+      ? item.draft_message
+      : null;
+
   // Only now, with a confirmed send, does the item change state.
   await supabase
     .from("daily_queue")
@@ -179,6 +196,7 @@ export async function sendQueueItem(
     action_type: item.action_type,
     status: "sent",
     draft_message: body,
+    original_draft: originalDraft,
     email_subject: channel === "email" ? subject : null,
     provider_message_id: result.messageId || null,
   });

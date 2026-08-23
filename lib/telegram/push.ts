@@ -44,7 +44,9 @@ export async function buildCardInput(
 ): Promise<ApprovalCardInput | null> {
   const { data: item } = await supabase
     .from("daily_queue")
-    .select("id, contact_id, action_type, draft_message, email_subject, call_talking_points, priority_reason, touch_label, decision_trace, status")
+    .select(
+      "id, contact_id, action_type, draft_message, email_subject, call_talking_points, priority_reason, touch_label, decision_trace, unvalidated_reasons, status"
+    )
     .eq("id", queueItemId)
     .maybeSingle();
 
@@ -78,6 +80,18 @@ export async function buildCardInput(
 
   const trace = item.decision_trace as { validation?: { reasons?: string[] } } | null;
 
+  // Phase 8 6A: drafting has its own three-state ladder, and dry run means the
+  // card is readable but cannot send. Read here rather than at render time so
+  // every surface that builds a card gets the same answer.
+  const { data: settings } = await supabase
+    .from("user_settings")
+    .select("drafting_mode")
+    .eq("user_id", contact.user_id)
+    .maybeSingle();
+
+  const hasDraft = Boolean((item.draft_message ?? "").trim());
+  const isQuotedDraft = item.priority_reason === "Quoted-window draft";
+
   return {
     queueItemId: item.id,
     contactName: contact.name,
@@ -97,7 +111,13 @@ export async function buildCardInput(
       ? { content: lastInbound.content ?? "", created_at: lastInbound.created_at }
       : null,
     bonzoProspectId: contact.bonzo_prospect_id,
-    unvalidatedReasons: trace?.validation?.reasons,
+    unvalidatedReasons:
+      (item.unvalidated_reasons as string[] | null) ?? trace?.validation?.reasons,
+    // Only a quoted-window draft is affected: an ordinary follow-up card has
+    // nothing generated on it, so dry-run drafting has no bearing on it.
+    readOnly:
+      isQuotedDraft && (settings?.drafting_mode ?? "off") !== "live",
+    canRedraft: isQuotedDraft && hasDraft,
   };
 }
 
@@ -189,6 +209,8 @@ export async function pushCard(
         queueItemId: input.queueItemId,
         actionType: input.actionType,
         bonzoProspectId: input.bonzoProspectId,
+        readOnly: input.readOnly,
+        canRedraft: input.canRedraft,
       }),
     }
   );

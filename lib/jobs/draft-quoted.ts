@@ -1,0 +1,271 @@
+/**
+ * draft_quoted — the only job in the app that spends money on prose.
+ *
+ * Phase 8 section 6A. It drafts one message for one lead inside the quoted
+ * window, stores it as a daily_queue row, and pushes the approval card. It
+ * never sends: Send is a button Eddie presses, and in dry run the card does
+ * not even carry one.
+ *
+ * Three gates stand in front of the model call, checked in this order, and
+ * none of them is optional:
+ *
+ *   1. drafting_mode — 'off' means no job is enqueued and this returns
+ *      immediately if one somehow exists.
+ *   2. draftDue — scope, the schedule, and D5's two hard constraints.
+ *   3. The daily token budget, which every model path in the app respects.
+ */
+
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { draftOne } from "@/lib/ai/draft-one";
+import { draftDue } from "@/lib/ai/draft-schedule";
+import {
+  getMortgageFields,
+  isInbound,
+  isOptedOut,
+  type BonzoCommunication,
+  type BonzoProspect,
+} from "@/lib/bonzo/client";
+import type { LeadState } from "@/lib/insights/lead-state";
+// Type-only, so this does not create a runtime cycle with handlers.ts, which
+// imports the handler below.
+import type { JobHandler } from "@/lib/jobs/handlers";
+import { localDate } from "@/lib/time";
+import type { AllStages } from "@/types/db";
+
+/** Marks the queue rows this job creates, so it can find its own work. */
+export const QUOTED_DRAFT_REASON = "Quoted-window draft";
+
+/** Logged for every generated draft, so the caps can count them. */
+export const DRAFT_GENERATED_ACTION = "draft_generated";
+
+export interface DraftSettings {
+  mode: "off" | "dry_run" | "live";
+  scheduleHours: number[];
+  maxRedraftsPerDay: number;
+  brokerName: string;
+  brokerCompany: string;
+  timeZone: string;
+}
+
+export async function readDraftSettings(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<DraftSettings> {
+  const { data } = await supabase
+    .from("user_settings")
+    .select(
+      "drafting_mode, draft_schedule_hours, max_redrafts_per_day, broker_display_name, broker_company, timezone"
+    )
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  return {
+    // Absent settings mean off. A missing row must never be read as
+    // permission to draft.
+    mode: (data?.drafting_mode as DraftSettings["mode"]) ?? "off",
+    scheduleHours: data?.draft_schedule_hours ?? [],
+    maxRedraftsPerDay: data?.max_redrafts_per_day ?? 0,
+    brokerName: data?.broker_display_name ?? "",
+    brokerCompany: data?.broker_company ?? "",
+    timeZone: data?.timezone ?? "America/Los_Angeles",
+  };
+}
+
+/**
+ * The handoff threshold, which is also the far edge of the drafting window.
+ *
+ * Read from the handoff workflow rather than duplicated as a constant: the
+ * window and the handoff are the same boundary seen from two sides, and if
+ * Eddie widens the rule to three days the drafting window has to follow. Two
+ * numbers that must agree, stored separately, will disagree.
+ */
+export async function windowDaysFor(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<number> {
+  const { data } = await supabase
+    .from("workflows")
+    .select("trigger_config")
+    .eq("user_id", userId)
+    .eq("trigger_type", "no_inbound_since")
+    .eq("action_type", "add_to_bonzo_campaign")
+    .maybeSingle();
+
+  const days = (data?.trigger_config as { days?: number } | null)?.days;
+  return typeof days === "number" && days > 0 ? days : 2;
+}
+
+export const draftQuoted: JobHandler = async (supabase, job) => {
+  const contactId = job.contact_id;
+  if (!contactId) throw new Error("draft_quoted requires a contact_id");
+
+  const { data: contact } = await supabase
+    .from("contacts")
+    .select(
+      "id, user_id, name, stage, stage_changed_at, insights_enabled, bonzo_prospect_id"
+    )
+    .eq("id", contactId)
+    .maybeSingle();
+
+  if (!contact) return { summary: "contact gone", usedModel: false };
+
+  const settings = await readDraftSettings(supabase, contact.user_id);
+  if (settings.mode === "off") {
+    return { summary: "drafting is off", usedModel: false };
+  }
+
+  const { data: cache } = await supabase
+    .from("insights_cache")
+    .select("lead_state, last_inbound_at, bonzo_communication, bonzo_prospect_data")
+    .eq("contact_id", contactId)
+    .maybeSingle();
+
+  const timeZone = settings.timeZone;
+  const today = localDate(new Date(), timeZone);
+
+  // Drafts already generated for this lead, and whether one is still pending.
+  const [{ data: generated }, { data: pending }] = await Promise.all([
+    supabase
+      .from("outreach_log")
+      .select("created_at")
+      .eq("contact_id", contactId)
+      .eq("action_type", DRAFT_GENERATED_ACTION)
+      .order("created_at", { ascending: false }),
+    supabase
+      .from("daily_queue")
+      .select("id")
+      .eq("contact_id", contactId)
+      .eq("priority_reason", QUOTED_DRAFT_REASON)
+      .eq("status", "pending")
+      .limit(1),
+  ]);
+
+  const due = draftDue({
+    stage: contact.stage as AllStages,
+    stageChangedAt: contact.stage_changed_at,
+    windowDays: await windowDaysFor(supabase, contact.user_id),
+    scheduleHours: settings.scheduleHours,
+    lastInboundAt: cache?.last_inbound_at ?? null,
+    draftsGenerated: (generated ?? []).map((r) => r.created_at as string),
+    hasPendingDraft: (pending ?? []).length > 0,
+    now: new Date(),
+    timeZone,
+  });
+
+  if (!due.due) {
+    return { summary: `no draft due: ${due.reason}`, usedModel: false };
+  }
+
+  const prospect = (cache?.bonzo_prospect_data as BonzoProspect | null) ?? null;
+  const communications = (cache?.bonzo_communication ?? []) as BonzoCommunication[];
+
+  /*
+   * An opt-out bars a draft as surely as it bars a send.
+   *
+   * Checked before the model call rather than at Send: a draft that can never
+   * go out is a card Eddie has to read and dismiss, plus tokens spent on a
+   * message with no recipient.
+   */
+  if (
+    prospect &&
+    (isOptedOut(prospect, "sms") ||
+      isOptedOut(prospect, "email") ||
+      prospect.do_not_call === true)
+  ) {
+    return { summary: "prospect is opted out; no draft", usedModel: false };
+  }
+
+  /*
+   * No loan file means no numbers, and a draft in this window without the
+   * numbers is the exact failure 6A.1 describes about the retired system —
+   * writing from almost nothing and filling the vacuum with enthusiasm. The
+   * validator would catch an invented figure, but not the blandness that
+   * comes from having nothing to say.
+   */
+  if (getMortgageFields(prospect) === null) {
+    return { summary: "no loan file; refusing to draft from nothing", usedModel: false };
+  }
+
+  const hoursSincePitch = contact.stage_changed_at
+    ? (Date.now() - new Date(contact.stage_changed_at).getTime()) / 3_600_000
+    : null;
+
+  const result = await draftOne({
+    channel: "sms",
+    contactName: contact.name,
+    brokerName: settings.brokerName,
+    brokerCompany: settings.brokerCompany,
+    prospect,
+    communications,
+    leadState: (cache?.lead_state as LeadState | null) ?? null,
+    hoursSincePitch,
+  });
+
+  // Recorded whether or not it validated: the caps count attempts, not
+  // successes, and a draft that failed twice still cost two calls.
+  await supabase.from("outreach_log").insert({
+    user_id: contact.user_id,
+    contact_id: contactId,
+    action_type: DRAFT_GENERATED_ACTION,
+    status: result.validated ? "drafted" : "drafted_unvalidated",
+    draft_message: result.body,
+  });
+
+  const { data: queued, error: queueErr } = await supabase
+    .from("daily_queue")
+    .insert({
+      user_id: contact.user_id,
+      contact_id: contactId,
+      queue_date: today,
+      priority_rank: 1,
+      priority_reason: QUOTED_DRAFT_REASON,
+      action_type: "sms",
+      draft_message: result.body,
+      status: "pending",
+      unvalidated_reasons: result.validated
+        ? null
+        : result.violations.map((v) => v.detail),
+    })
+    .select("id")
+    .single();
+
+  if (queueErr) throw queueErr;
+
+  /*
+   * Dry run stops here. The row exists and can be read on /daily, but no card
+   * goes to the phone — a card with no Send button that arrives at 7am is a
+   * notification Eddie cannot act on, and the point of dry run is to look at
+   * the drafts deliberately rather than be interrupted by them.
+   */
+  if (settings.mode === "dry_run") {
+    return {
+      summary:
+        `drafted for ${contact.name} (dry run, not pushed)` +
+        (result.validated ? "" : ` — unvalidated: ${result.violations.length} issues`),
+      usedModel: true,
+    };
+  }
+
+  const { pushCard } = await import("@/lib/telegram/push");
+  const push = await pushCard(supabase, contact.user_id, queued.id);
+
+  return {
+    summary:
+      `drafted for ${contact.name}` +
+      (result.validated ? "" : ` — unvalidated: ${result.violations.length} issues`) +
+      (push.pushed ? "; pushed" : `; not pushed (${push.reason})`),
+    usedModel: true,
+  };
+};
+
+/** Whether the lead has replied since the quote — used by the enqueue sweep. */
+export function hasRepliedSincePitch(
+  communications: BonzoCommunication[],
+  pitchedAt: string | null
+): boolean {
+  if (!pitchedAt) return false;
+  const pitch = new Date(pitchedAt).getTime();
+  return communications.some(
+    (c) => isInbound(c.direction) && new Date(c.created_at).getTime() > pitch
+  );
+}

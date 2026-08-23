@@ -129,6 +129,56 @@ export async function sweepRefreshJobs(
 }
 
 /**
+ * Enqueues a drafting job per lead in the quoted window (Phase 8 6A).
+ *
+ * Deliberately a separate sweep from the refresh one. That sweep is free and
+ * runs for every active lead; this one leads to a model call and runs only for
+ * leads in one stage, and only when drafting is switched on at all. Folding
+ * them together would put the single paid path in the app behind the same
+ * gate as the free one, which is exactly the kind of coupling that makes a
+ * cost rule stop holding.
+ *
+ * Whether a draft is actually *due* is decided in the job, by draftDue. This
+ * only decides who is worth asking about — the schedule, the two hard
+ * constraints and the scope check all live in one place, and it is not here.
+ */
+export async function sweepDraftJobs(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<{ enqueued: number; reason?: string }> {
+  const { data: settings } = await supabase
+    .from("user_settings")
+    .select("drafting_mode")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  // Off means no job is ever created, so no token can ever be spent. A missing
+  // settings row reads as off, never as permission.
+  if ((settings?.drafting_mode ?? "off") === "off") {
+    return { enqueued: 0, reason: "drafting is off" };
+  }
+
+  const { data: contacts } = await supabase
+    .from("contacts")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("stage", "quoted_follow_up")
+    .not("bonzo_prospect_id", "is", null);
+
+  let enqueued = 0;
+  for (const contact of contacts ?? []) {
+    const created = await enqueueJob(supabase, {
+      userId,
+      contactId: contact.id,
+      jobType: "draft_quoted",
+    });
+    if (created) enqueued++;
+  }
+
+  return { enqueued };
+}
+
+/**
  * Enqueues the morning digest once the local clock has passed the configured
  * time and today's digest has not gone out.
  *
@@ -188,6 +238,13 @@ export async function sweepAllUsers(
     try {
       await enqueueDigestIfDue(supabase, u.user_id, now);
       out[u.user_id] = await sweepRefreshJobs(supabase, u.user_id, now);
+      // Drafting rides the same tick but is gated independently — see
+      // sweepDraftJobs. A failure here must not stop the refresh sweep.
+      try {
+        await sweepDraftJobs(supabase, u.user_id);
+      } catch (e) {
+        console.error(`[jobs/enqueue] draft sweep failed for ${u.user_id}:`, e);
+      }
     } catch (e) {
       console.error(`[jobs/enqueue] sweep failed for ${u.user_id}:`, e);
       out[u.user_id] = {

@@ -186,6 +186,8 @@ export async function handleApprovalCallback(
             queueItemId,
             actionType: input.actionType,
             bonzoProspectId: input.bonzoProspectId,
+            readOnly: input.readOnly,
+            canRedraft: input.canRedraft,
           }),
         });
       }
@@ -210,6 +212,22 @@ export async function handleApprovalCallback(
       session.queueItemId = queueItemId;
       await ctx.reply(
         "Send me the message text. Your next message becomes the body verbatim, then it sends."
+      );
+      return true;
+
+    /*
+     * 6A.4 — Redraft. Distinct from Edit in what happens to the reply: Edit
+     * takes the text verbatim and sends it, Redraft takes an instruction and
+     * produces a new draft to approve. Keeping them as separate session
+     * actions is what stops "shorter" being texted to a client.
+     */
+    case CB.redraft:
+      await ctx.answerCallbackQuery();
+      session.action = "queue_redraft";
+      session.queueItemId = queueItemId;
+      await ctx.reply(
+        "What should change? Reply with an instruction — \"shorter\", \"lead with the credit\", " +
+          "\"drop the second line\". Nothing sends until you approve the new draft."
       );
       return true;
 
@@ -381,8 +399,11 @@ export async function handleApprovalText(
   const text = ctx.message?.text?.trim();
   if (!text || !ctx.from) return false;
 
-  if (session.action !== "queue_edit") return false;
+  if (session.action !== "queue_edit" && session.action !== "queue_redraft") {
+    return false;
+  }
 
+  const isRedraft = session.action === "queue_redraft";
   const queueItemId = session.queueItemId;
   if (!queueItemId) {
     clear();
@@ -397,6 +418,40 @@ export async function handleApprovalText(
   }
 
   clear();
+
+  if (isRedraft) {
+    const { redraftQueueItem } = await import("@/lib/telegram/redraft");
+    const outcome = await redraftQueueItem(supabase, userId, queueItemId, text);
+
+    if (!outcome.ok) {
+      await ctx.reply(outcome.refusal ?? "That didn't work.");
+      return true;
+    }
+
+    const flag = outcome.validated
+      ? ""
+      : `\n\n⚠️ Still breaks the rules: ${(outcome.violations ?? []).join("; ")}`;
+
+    const input = await buildCardInput(supabase, queueItemId);
+    await ctx.reply(
+      `<pre>${escapeHtml(outcome.body ?? "")}</pre>${flag}` +
+        `\n\n<i>${outcome.remaining} redraft${outcome.remaining === 1 ? "" : "s"} left for this lead today.</i>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: input
+          ? approvalKeyboard({
+              queueItemId,
+              actionType: input.actionType,
+              bonzoProspectId: input.bonzoProspectId,
+              readOnly: input.readOnly,
+              canRedraft: input.canRedraft,
+            })
+          : undefined,
+      }
+    );
+    return true;
+  }
+
   // Verbatim. Not re-drafted, not re-validated, not "improved" — he wrote it,
   // it sends as written.
   await applySend(ctx, supabase, userId, queueItemId, text);
