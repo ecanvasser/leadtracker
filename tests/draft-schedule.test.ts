@@ -13,6 +13,10 @@ function input(over: Partial<DraftDueInput> = {}): DraftDueInput {
     windowDays: 2,
     scheduleHours: [3, 24],
     lastInboundAt: null,
+    // Older than the quote by default, so the anchor stays the quote and the
+    // existing cases keep testing what they were written to test.
+    lastMessageAt: hoursAgo(30),
+    minHoursSinceLastMessage: 6,
     draftsGenerated: [],
     hasPendingDraft: false,
     now: NOW,
@@ -25,7 +29,7 @@ describe("the D5 schedule", () => {
   it("offers nothing in the first three hours", () => {
     const out = draftDue(input({ stageChangedAt: hoursAgo(1) }));
     expect(out.due).toBe(false);
-    expect(out.reason).toContain("since the quote");
+    expect(out.reason).toContain("since the last touch");
   });
 
   it("offers the first draft once three hours have passed", () => {
@@ -163,5 +167,67 @@ describe("the schedule is configuration, not code", () => {
   it("does not care what order the hours are given in", () => {
     const out = draftDue(input({ scheduleHours: [24, 3], stageChangedAt: hoursAgo(4) }));
     expect(out.slotHours).toBe(3);
+  });
+});
+
+/*
+ * The anchor is the last message, not the quote.
+ *
+ * Eddie's ask: "if the last message was the day prior, we need a touchpoint.
+ * If the last message was within the last 6 hours, we are probably ok to hold
+ * off." Counting from the quote alone got this wrong in the one case that
+ * matters — a lead quoted in the morning and messaged again after lunch.
+ */
+describe("holding off while the conversation is warm", () => {
+  it("offers nothing when the last message was an hour ago", () => {
+    const out = draftDue(
+      input({ stageChangedAt: hoursAgo(30), lastMessageAt: hoursAgo(1) })
+    );
+    expect(out.due).toBe(false);
+    expect(out.reason).toContain("1.0h ago");
+  });
+
+  it("counts Eddie's own outbound as a touch", () => {
+    // The lead was quoted two days ago and every slot has long since passed,
+    // but he messaged them this morning. A draft now would be his second
+    // touch in three hours.
+    const out = draftDue(
+      input({ stageChangedAt: hoursAgo(48), lastMessageAt: hoursAgo(3) })
+    );
+    expect(out.due).toBe(false);
+  });
+
+  it("offers a touchpoint once the last message is a day old", () => {
+    const out = draftDue(
+      input({ stageChangedAt: hoursAgo(30), lastMessageAt: hoursAgo(26) })
+    );
+    expect(out.due).toBe(true);
+  });
+
+  it("re-anchors on a later message rather than counting from the quote", () => {
+    /*
+     * Quoted at 9am, messaged again at 2pm, and it is now 5pm. The three-hour
+     * slot is eight hours past if measured from the quote; from the message it
+     * has only just been reached, and the 6-hour floor holds it back.
+     */
+    const out = draftDue(
+      input({ stageChangedAt: hoursAgo(8), lastMessageAt: hoursAgo(3) })
+    );
+    expect(out.due).toBe(false);
+    expect(out.reason).toContain("3.0h ago");
+  });
+
+  it("still lets a reply end the schedule outright", () => {
+    // Unchanged by any of this: a reply makes the lead Eddie's to write, and
+    // that outranks the pacing rules rather than being one of them.
+    const out = draftDue(
+      input({
+        stageChangedAt: hoursAgo(30),
+        lastInboundAt: hoursAgo(26),
+        lastMessageAt: hoursAgo(26),
+      })
+    );
+    expect(out.due).toBe(false);
+    expect(out.reason).toContain("yours to write");
   });
 });

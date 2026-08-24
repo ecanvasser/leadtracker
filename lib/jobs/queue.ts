@@ -23,6 +23,14 @@ export const JOB_TYPES = [
   "morning_digest",
   // Phase 8 6A. The only job that spends money on prose.
   "draft_quoted",
+  /*
+   * Evaluates the rules for one lead against facts already in the cache.
+   * Enqueued by a database trigger on a genuine stage change, because the
+   * stage_changed trigger needs a previous stage and refresh_cache has none
+   * to give — it passes null, which that trigger reads as "not a stage-change
+   * evaluation" and declines. No Bonzo call, no model call, no cost.
+   */
+  "evaluate_workflows",
 ] as const;
 
 export type JobType = (typeof JOB_TYPES)[number];

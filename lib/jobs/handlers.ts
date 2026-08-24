@@ -518,6 +518,98 @@ export const draftReply: JobHandler = async (supabase, job) => {
 };
 
 /**
+ * evaluate_workflows — run the rules for one lead, on a real stage change.
+ *
+ * Exists because refresh_cache cannot do this job. It passes
+ * `previousStage: null`, and matchTrigger('stage_changed') declines anything
+ * without a previous stage; and its evaluation block sits below the "no new
+ * messages" early return, which a stage change never clears — moving a lead
+ * in LeadTracker does not create a Bonzo message. The rule could not fire
+ * from there for either reason alone.
+ *
+ * Enqueued by a database trigger on contacts, so it covers every path a stage
+ * can change through without any of them having to remember to call it.
+ *
+ * Reads the previous stage from stage_transitions rather than the job payload.
+ * The outstanding-job index coalesces two moves inside one drain window into
+ * a single job, and the *latest* transition is the one worth evaluating — a
+ * lead now in App In should not have a rule fire about it entering Quoted.
+ *
+ * Facts come from insights_cache, never from Bonzo. That keeps this free and
+ * fast, which is what makes it safe to run on every stage change; the cache is
+ * at most one sweep stale, and nothing here reads a value where that matters.
+ */
+export const evaluateWorkflowsJob: JobHandler = async (supabase, job) => {
+  const contactId = job.contact_id;
+  if (!contactId) throw new Error("evaluate_workflows requires a contact_id");
+
+  const { data: contact, error: contactErr } = await supabase
+    .from("contacts")
+    .select("*")
+    .eq("id", contactId)
+    .maybeSingle();
+
+  if (contactErr) throw contactErr;
+  if (!contact) return { summary: "contact gone", usedModel: false };
+
+  const { data: transition } = await supabase
+    .from("stage_transitions")
+    .select("from_stage, to_stage, changed_at")
+    .eq("contact_id", contactId)
+    .order("changed_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!transition?.from_stage) {
+    // A lead's first arrival logs a transition with no from_stage. Nothing
+    // stage-based can match that, and the seed tests assert it must not.
+    return { summary: "no previous stage to evaluate against", usedModel: false };
+  }
+
+  if (transition.to_stage !== contact.stage) {
+    // The lead moved again between the trigger firing and this job draining.
+    // The transition row is stale; a later job is already queued for the move
+    // that actually happened.
+    return { summary: "superseded by a later stage change", usedModel: false };
+  }
+
+  const { data: cache } = await supabase
+    .from("insights_cache")
+    .select("bonzo_prospect_data, bonzo_communication, lead_state, lead_state_at")
+    .eq("contact_id", contactId)
+    .maybeSingle();
+
+  const { runWorkflowsForContact, buildFacts } = await import("@/lib/workflows/run");
+
+  const facts = buildFacts({
+    contact: contact as Contact,
+    prospect: (cache?.bonzo_prospect_data as BonzoProspect | null) ?? null,
+    communications:
+      (cache?.bonzo_communication as { direction: string; created_at: string }[] | null) ?? [],
+    leadState: (cache?.lead_state as LeadState | null) ?? null,
+    leadStateAt: (cache?.lead_state_at as string | null) ?? null,
+    previousStage: transition.from_stage,
+    // A stage change is not an inbound reply. Triggers that key on one must
+    // not see this evaluation as though a message had arrived.
+    hasNewInbound: false,
+  });
+
+  const wf = await runWorkflowsForContact({
+    supabase,
+    userId: contact.user_id,
+    contact: contact as Contact,
+    facts,
+  });
+
+  return {
+    summary: wf.ran
+      ? `${transition.from_stage} -> ${transition.to_stage}; workflow ${wf.status}: ${wf.summary}`
+      : `${transition.from_stage} -> ${transition.to_stage}; no rule matched`,
+    usedModel: false,
+  };
+};
+
+/**
  * morning_digest — the day's opening summary.
  *
  * Enqueued by the sweep once the local clock passes the configured time. The
@@ -570,6 +662,7 @@ export const INBOUND_REPLY_REASON = "They replied — respond";
 export const handlers: Partial<Record<Job["job_type"], JobHandler>> = {
   draft_quoted: draftQuoted,
   refresh_cache: refreshCache,
+  evaluate_workflows: evaluateWorkflowsJob,
   draft_reply: draftReply,
   morning_digest: morningDigest,
 };

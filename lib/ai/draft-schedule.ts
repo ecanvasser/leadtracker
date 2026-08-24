@@ -10,6 +10,13 @@
  * no reply, one at twenty-four hours if it is still silent, and day two is the
  * handoff decision rather than a third draft. The hours live in
  * `user_settings.draft_schedule_hours`, not here.
+ *
+ * The clock those hours run against is the **last message**, not the quote.
+ * A lead quoted at 9am and messaged again at 2pm has had a touch at 2pm, and
+ * a draft three hours after the quote would land on top of it. Eddie sending
+ * something resets the clock, which is the behaviour he asked for: if the last
+ * message was yesterday a touchpoint is owed, and if it was within a few hours
+ * it is not.
  */
 
 import { localDate } from "@/lib/time";
@@ -22,10 +29,22 @@ export interface DraftDueInput {
   stageChangedAt: string | null;
   /** The handoff threshold; the far edge of the window. */
   windowDays: number;
-  /** Hours after the pitch at which a draft is offered. */
+  /** Hours after the last message at which a draft is offered. */
   scheduleHours: number[];
   /** Newest inbound message in the thread, if any. */
   lastInboundAt: string | null;
+  /**
+   * Newest message in either direction. The schedule's anchor: Eddie's own
+   * outbound counts, because a draft's job is to be the next touch and a
+   * message he just sent already was one.
+   */
+  lastMessageAt: string | null;
+  /**
+   * Hours of quiet required before anything is due, from
+   * `user_settings.min_hours_since_last_message`. A floor under the whole
+   * schedule rather than a property of one slot.
+   */
+  minHoursSinceLastMessage: number;
   /** When drafts have already been generated for this lead, any order. */
   draftsGenerated: string[];
   /** True when a draft for this lead is still waiting to be approved. */
@@ -37,7 +56,7 @@ export interface DraftDueInput {
 export interface DraftDueResult {
   due: boolean;
   reason: string;
-  /** Which scheduled slot this draft is for, in hours since the pitch. */
+  /** Which scheduled slot this draft is for, in hours since the last message. */
   slotHours?: number;
 }
 
@@ -97,13 +116,43 @@ export function draftDue(input: DraftDueInput): DraftDueResult {
     return { due: false, reason: "already drafted for this lead today" };
   }
 
+  /*
+   * The conversation is still warm — hold off.
+   *
+   * Checked before the slots rather than folded into them, because it is a
+   * different kind of rule: the slots say when a touch is owed, this says
+   * when any touch would be intrusive regardless of what is owed. Measured in
+   * either direction, so a message Eddie sent five minutes ago suppresses a
+   * draft just as a reply would.
+   */
+  const lastMessage = input.lastMessageAt ? new Date(input.lastMessageAt) : null;
+  if (lastMessage && Number.isFinite(lastMessage.getTime())) {
+    const quietHours = (input.now.getTime() - lastMessage.getTime()) / 3_600_000;
+    if (quietHours < input.minHoursSinceLastMessage) {
+      return {
+        due: false,
+        reason: `last message was ${quietHours.toFixed(1)}h ago`,
+      };
+    }
+  }
+
   // ---- Which slot, if any, is owed ----------------------------------------
-  const elapsedHours = (input.now.getTime() - pitchedAt.getTime()) / 3_600_000;
+  /*
+   * Anchored on the later of the quote and the last message. Before this the
+   * clock ran from the quote alone, so a lead quoted at 9am and messaged again
+   * at 2pm was still judged three hours late at noon — counting from a touch
+   * that had already been superseded.
+   */
+  const anchor =
+    lastMessage && Number.isFinite(lastMessage.getTime()) && lastMessage > pitchedAt
+      ? lastMessage
+      : pitchedAt;
+  const elapsedHours = (input.now.getTime() - anchor.getTime()) / 3_600_000;
   const slots = [...input.scheduleHours].sort((a, b) => a - b);
   const reached = slots.filter((h) => elapsedHours >= h);
 
   if (reached.length === 0) {
-    return { due: false, reason: `only ${elapsedHours.toFixed(1)}h since the quote` };
+    return { due: false, reason: `only ${elapsedHours.toFixed(1)}h since the last touch` };
   }
 
   /*

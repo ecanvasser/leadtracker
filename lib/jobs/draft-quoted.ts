@@ -42,6 +42,8 @@ export interface DraftSettings {
   mode: "off" | "dry_run" | "live";
   scheduleHours: number[];
   maxRedraftsPerDay: number;
+  /** Hours of quiet required before a draft is due. See draft-schedule.ts. */
+  minHoursSinceLastMessage: number;
   brokerName: string;
   brokerCompany: string;
   timeZone: string;
@@ -54,7 +56,7 @@ export async function readDraftSettings(
   const { data } = await supabase
     .from("user_settings")
     .select(
-      "drafting_mode, draft_schedule_hours, max_redrafts_per_day, broker_display_name, broker_company, timezone"
+      "drafting_mode, draft_schedule_hours, max_redrafts_per_day, min_hours_since_last_message, broker_display_name, broker_company, timezone"
     )
     .eq("user_id", userId)
     .maybeSingle();
@@ -65,6 +67,10 @@ export async function readDraftSettings(
     mode: (data?.drafting_mode as DraftSettings["mode"]) ?? "off",
     scheduleHours: data?.draft_schedule_hours ?? [],
     maxRedraftsPerDay: data?.max_redrafts_per_day ?? 0,
+    // Six hours if the column is somehow absent. Erring toward quiet: the
+    // failure of too high is a late touch, of too low a draft on top of a
+    // conversation Eddie is already having.
+    minHoursSinceLastMessage: data?.min_hours_since_last_message ?? 6,
     brokerName: data?.broker_display_name ?? "",
     brokerCompany: data?.broker_company ?? "",
     timeZone: data?.timezone ?? "America/Los_Angeles",
@@ -124,7 +130,9 @@ export const draftQuoted: JobHandler = async (supabase, job) => {
 
   const { data: cache } = await supabase
     .from("insights_cache")
-    .select("lead_state, last_inbound_at, bonzo_communication, bonzo_prospect_data")
+    .select(
+      "lead_state, last_inbound_at, last_message_at, bonzo_communication, bonzo_prospect_data"
+    )
     .eq("contact_id", contactId)
     .maybeSingle();
 
@@ -154,6 +162,8 @@ export const draftQuoted: JobHandler = async (supabase, job) => {
     windowDays: await windowDaysFor(supabase, contact.user_id),
     scheduleHours: settings.scheduleHours,
     lastInboundAt: cache?.last_inbound_at ?? null,
+    lastMessageAt: cache?.last_message_at ?? null,
+    minHoursSinceLastMessage: settings.minHoursSinceLastMessage,
     draftsGenerated: (generated ?? []).map((r) => r.created_at as string),
     hasPendingDraft: (pending ?? []).length > 0,
     now: new Date(),
