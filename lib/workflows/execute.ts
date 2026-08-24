@@ -201,13 +201,19 @@ export async function executeAction(input: ExecuteInput): Promise<ActionResult> 
 
         const displacedCampaign = currentCampaign(prospect);
 
+        // Same reasoning as describeAction: the confirmation should name what
+        // it did, not make Eddie look up an id to find out.
+        const campaignLabel = cfg.campaign_name
+          ? `${cfg.campaign_name} (${campaignId})`
+          : `campaign ${campaignId}`;
+
         await moveProspectToCampaign(contact.bonzo_prospect_id, campaignId);
 
         return {
           ok: true,
           summary: displacedCampaign
-            ? `moved to campaign ${campaignId}, replacing ${displacedCampaign.name}`
-            : `moved to campaign ${campaignId}`,
+            ? `moved to ${campaignLabel}, replacing ${displacedCampaign.name}`
+            : `moved to ${campaignLabel}`,
           displaced: displacedCampaign
             ? { campaign_id: displacedCampaign.id, campaign_name: displacedCampaign.name }
             : null,

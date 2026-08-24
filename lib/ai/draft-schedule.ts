@@ -34,9 +34,10 @@ export interface DraftDueInput {
   /** Newest inbound message in the thread, if any. */
   lastInboundAt: string | null;
   /**
-   * Newest message in either direction. The schedule's anchor: Eddie's own
+   * Newest message in either direction, and the schedule's anchor. Eddie's own
    * outbound counts, because a draft's job is to be the next touch and a
-   * message he just sent already was one.
+   * message he just sent already was one. Null when the thread is empty, in
+   * which case the quote anchors instead.
    */
   lastMessageAt: string | null;
   /**
@@ -138,15 +139,21 @@ export function draftDue(input: DraftDueInput): DraftDueResult {
 
   // ---- Which slot, if any, is owed ----------------------------------------
   /*
-   * Anchored on the later of the quote and the last message. Before this the
-   * clock ran from the quote alone, so a lead quoted at 9am and messaged again
-   * at 2pm was still judged three hours late at noon — counting from a touch
-   * that had already been superseded.
+   * The clock runs from the last message, whether that is before or after the
+   * quote. Falling back to the quote only when there are no messages at all.
+   *
+   * Taking the *later* of the two was wrong in the case that prompted this:
+   * a lead whose conversation went quiet three days ago, moved into Quoted –
+   * Follow Up this afternoon. The quote is the more recent of the two
+   * timestamps, so anchoring on it restarted the clock and reported "only 1h
+   * since the last touch" for a thread that had been silent for three days —
+   * exactly the lead most owed a touchpoint.
+   *
+   * Moving a card is not a touch. Only a message is, so only a message
+   * anchors the schedule.
    */
   const anchor =
-    lastMessage && Number.isFinite(lastMessage.getTime()) && lastMessage > pitchedAt
-      ? lastMessage
-      : pitchedAt;
+    lastMessage && Number.isFinite(lastMessage.getTime()) ? lastMessage : pitchedAt;
   const elapsedHours = (input.now.getTime() - anchor.getTime()) / 3_600_000;
   const slots = [...input.scheduleHours].sort((a, b) => a - b);
   const reached = slots.filter((h) => elapsedHours >= h);

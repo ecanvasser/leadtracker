@@ -13,9 +13,9 @@ function input(over: Partial<DraftDueInput> = {}): DraftDueInput {
     windowDays: 2,
     scheduleHours: [3, 24],
     lastInboundAt: null,
-    // Older than the quote by default, so the anchor stays the quote and the
-    // existing cases keep testing what they were written to test.
-    lastMessageAt: hoursAgo(30),
+    // Null by default, so the quote anchors and the original cases keep
+    // testing what they were written to test.
+    lastMessageAt: null,
     minHoursSinceLastMessage: 6,
     draftsGenerated: [],
     hasPendingDraft: false,
@@ -179,6 +179,21 @@ describe("the schedule is configuration, not code", () => {
  * matters — a lead quoted in the morning and messaged again after lunch.
  */
 describe("holding off while the conversation is warm", () => {
+  it("counts from a quiet thread, not from when the card was moved", () => {
+    /*
+     * The case that prompted the change. Eddie replied three days ago, heard
+     * nothing, and moved the lead into Quoted this afternoon. Anchoring on
+     * the more recent of the two timestamps picked the card move and reported
+     * "only 1h since the last touch" — suppressing a draft for the lead most
+     * owed one. Moving a card is not a touch.
+     */
+    const out = draftDue(
+      input({ stageChangedAt: hoursAgo(1), lastMessageAt: hoursAgo(72) })
+    );
+    expect(out.due).toBe(true);
+    expect(out.slotHours).toBe(3);
+  });
+
   it("offers nothing when the last message was an hour ago", () => {
     const out = draftDue(
       input({ stageChangedAt: hoursAgo(30), lastMessageAt: hoursAgo(1) })

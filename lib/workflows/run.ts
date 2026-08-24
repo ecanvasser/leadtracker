@@ -98,7 +98,20 @@ export function describeAction(
   const cfg = workflow.action_config ?? {};
   switch (workflow.action_type) {
     case "add_to_bonzo_campaign":
-      return `Move to Bonzo campaign ${campaignName ?? cfg.campaign_id}`;
+      /*
+       * A bare id tells Eddie nothing about what he is approving — "Move to
+       * Bonzo campaign 198426" asks him to remember which one that is, on his
+       * phone, for a decision that starts messaging a client.
+       *
+       * `campaign_name` is written into action_config alongside the id when a
+       * rule is created, so the name is available without a Bonzo lookup on
+       * the approval path. Falls back to the id when a rule predates that, and
+       * shows both when the name is known, since the id is what appears in
+       * Bonzo's own URLs.
+       */
+      return campaignName ?? cfg.campaign_name
+        ? `Move to Bonzo campaign ${campaignName ?? cfg.campaign_name} (${cfg.campaign_id})`
+        : `Move to Bonzo campaign ${cfg.campaign_id}`;
     case "move_stage":
       return `Move to ${STAGE_LABELS[cfg.stage as AllStages] ?? cfg.stage}`;
     case "mark_adverse":
