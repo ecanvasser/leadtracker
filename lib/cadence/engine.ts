@@ -1,5 +1,5 @@
 import { Contact } from "@/types/db";
-import { isInbound, isOutbound } from "@/lib/bonzo/client";
+import { isInbound, isOutbound, messagesOnly } from "@/lib/bonzo/client";
 import {
   DEFAULT_TIMEZONE,
   isLocalSaturday,
@@ -64,6 +64,12 @@ export interface BonzoCommEntry {
   direction: string;
   type: string;
   created_at: string;
+  /**
+   * Present so audit entries can be told apart from messages. Optional
+   * because callers built this shape before the distinction existed; absent
+   * reads as a real message, which is the safe direction. See isRealMessage.
+   */
+  source?: string | null;
 }
 
 export interface QueueAction {
@@ -104,7 +110,9 @@ export interface LeadPlan {
  * call is not the same signal as an ignored message.
  */
 export function consecutiveUnanswered(comms: BonzoCommEntry[]): number {
-  const sorted = [...comms].sort(
+  // An audit entry is outgoing, so without this a campaign move counts as an
+  // unanswered touch and pushes a lead toward the unresponsive cap.
+  const sorted = messagesOnly(comms).sort(
     (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
   );
   let count = 0;
@@ -123,7 +131,9 @@ export function daysSinceLastTouch(
 ): number | null {
   const times = [
     ...history.filter((e) => e.status !== "skipped").map((e) => e.created_at),
-    ...comms.filter((c) => isOutbound(c.direction)).map((c) => c.created_at),
+    ...messagesOnly(comms)
+      .filter((c) => isOutbound(c.direction))
+      .map((c) => c.created_at),
   ]
     .map((t) => new Date(t).getTime())
     .filter((t) => Number.isFinite(t));

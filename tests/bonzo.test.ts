@@ -11,6 +11,8 @@ import {
   BonzoRequestError,
   BonzoRateLimitError,
   stripBonzoPipeline,
+  isRealMessage,
+  messagesOnly,
 } from "@/lib/bonzo/client";
 
 describe("getMortgageFields", () => {
@@ -388,5 +390,81 @@ describe("Bonzo pipeline fields never enter the app", () => {
   it("passes through null and non-objects rather than throwing", () => {
     expect(stripBonzoPipeline(null)).toBeNull();
     expect(stripBonzoPipeline(undefined)).toBeUndefined();
+  });
+});
+
+/*
+ * Audit entries versus messages.
+ *
+ * Bonzo's communication feed interleaves both. The audit rows are marked
+ * `source: "update"` and arrive as `direction: "outgoing"`, so every outbound
+ * calculation in the app counted them until this existed — the last-message
+ * watermark, the silence clock, the consecutive-touch count, and the ten
+ * verbatim outbound messages used as drafting style exemplars.
+ *
+ * The shapes below are transcribed from production rows, not invented.
+ */
+describe("isRealMessage", () => {
+  const campaignMove = {
+    direction: "outgoing",
+    type: null,
+    source: "update",
+    created_at: "2026-08-24T16:35:45.000000Z",
+    content: 'Person moved to <a href="...">Responded (NEW Quoted)</a> campaign',
+  };
+  const actionSkipped = {
+    direction: "outgoing",
+    type: "",
+    source: "update",
+    created_at: "2026-08-20T10:00:00.000000Z",
+    content: "Action skipped: action template has no target configured",
+  };
+  const realSms = {
+    direction: "outgoing",
+    type: "sms",
+    source: "direct",
+    created_at: "2026-08-21T21:46:17.000000Z",
+    content: "Hey James, what's your timeline on getting started?",
+  };
+
+  it("rejects the audit entries a campaign move writes", () => {
+    expect(isRealMessage(campaignMove)).toBe(false);
+    expect(isRealMessage(actionSkipped)).toBe(false);
+  });
+
+  it("keeps messages on every channel and source Bonzo uses", () => {
+    expect(isRealMessage(realSms)).toBe(true);
+    for (const type of ["sms", "mms", "email", "call", "voicemail"]) {
+      for (const source of [null, "direct", "mobile", "inbox", "api"]) {
+        expect(isRealMessage({ type, source })).toBe(true);
+      }
+    }
+  });
+
+  it("treats an entry with no source as a message", () => {
+    /*
+     * The safe direction, and the reason this is not an allowlist on `type`.
+     * A stricter version dropped every row in a payload that omitted the
+     * field; believing a lead is quieter than they are means chasing someone
+     * who just replied, which is worse than a clock that resets late.
+     */
+    expect(isRealMessage({ direction: "outgoing", created_at: "x" })).toBe(true);
+    expect(isRealMessage({ type: "sms" })).toBe(true);
+  });
+
+  it("leaves the real thread intact and in order", () => {
+    const kept = messagesOnly([campaignMove, realSms, actionSkipped]);
+    expect(kept).toEqual([realSms]);
+  });
+
+  it("does not let a campaign move become the newest outbound message", () => {
+    // The exact regression: enrolling a lead wrote an entry newer than any
+    // real message, which then reset the drafting hold-off and suppressed the
+    // follow-up for a thread that had been silent for three days.
+    const newest = messagesOnly([realSms, campaignMove])
+      .map((c) => c.created_at)
+      .sort()
+      .at(-1);
+    expect(newest).toBe(realSms.created_at);
   });
 });

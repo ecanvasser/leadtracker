@@ -22,6 +22,8 @@ import type { LeadFacts, Workflow } from "@/lib/workflows/types";
 import {
   getMortgageFields,
   isInbound,
+  messagesOnly,
+  type CommunicationLike,
   isOptedOut,
   isOutbound,
   type BonzoProspect,
@@ -51,13 +53,17 @@ export function parseLoanAmount(raw: unknown): number | null {
 export function buildFacts(input: {
   contact: Contact;
   prospect: BonzoProspect | null;
-  communications: { direction: string; created_at: string }[];
+  communications: CommunicationLike[];
   leadState: LeadState | null;
   leadStateAt: string | null;
   previousStage: AllStages | null;
   hasNewInbound: boolean;
 }): LeadFacts {
-  const { contact, prospect, communications } = input;
+  const { contact, prospect } = input;
+  // Audit entries ("Person moved to <campaign> campaign") arrive as outgoing
+  // and would otherwise set lastOutboundAt, resetting every silence clock the
+  // rules read. See isRealMessage.
+  const communications = messagesOnly(input.communications);
 
   const latest = (match: (d: string) => boolean): string | null => {
     const times = communications

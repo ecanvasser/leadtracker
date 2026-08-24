@@ -31,6 +31,7 @@ import {
 import {
   getMortgageFields,
   isOutbound,
+  messagesOnly,
   type BonzoCommunication,
   type BonzoProspect,
 } from "@/lib/bonzo/client";
@@ -136,7 +137,7 @@ export function styleExemplars(
   communications: BonzoCommunication[],
   limit: number = STYLE_EXEMPLAR_COUNT
 ): string[] {
-  return communications
+  return messagesOnly(communications)
     .filter((c) => isOutbound(c.direction) && (c.content ?? "").trim().length > 0)
     .sort(
       (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
@@ -190,7 +191,7 @@ function buildUserMessage(input: DraftOneInput): string {
     parts.push(`THE READ ON THIS LEAD:\n${ls.join("\n")}`);
   }
 
-  const thread = input.communications
+  const thread = messagesOnly(input.communications)
     .slice(-20)
     .map((c) => {
       const who = isOutbound(c.direction) ? input.brokerName : input.contactName;
@@ -254,7 +255,7 @@ export async function draftOne(input: DraftOneInput): Promise<DraftOneResult> {
     // never against Eddie's own past messages — see DraftContext.
     specificityCorpus: buildGroundingCorpus(
       input.prospect,
-      input.communications.filter((c) => !isOutbound(c.direction))
+      messagesOnly(input.communications).filter((c) => !isOutbound(c.direction))
     ),
   };
 

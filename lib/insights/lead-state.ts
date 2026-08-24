@@ -30,6 +30,8 @@ import {
   getMortgageFields,
   isInbound,
   isOutbound,
+  messagesOnly,
+  type CommunicationLike,
   type BonzoProspect,
 } from "@/lib/bonzo/client";
 
@@ -175,6 +177,8 @@ export interface ClassifyInput {
     direction: string;
     type: string;
     created_at: string;
+    /** Distinguishes Bonzo's audit entries from messages. See isRealMessage. */
+    source?: string | null;
   }[];
   notes?: { content: string; created_at: string }[];
   leadAgeDays: number;
@@ -318,8 +322,12 @@ function buildClassifyMessage(input: ClassifyInput): string {
     parts.push("LOAN FILE: no mortgage details on record.");
   }
 
-  if (input.communications.length > 0) {
-    const sorted = [...input.communications].sort(
+  const threadMessages = messagesOnly(input.communications);
+  if (threadMessages.length > 0) {
+    // "Person moved to <campaign> campaign" is not something the lead said,
+    // and a classifier that quotes it as evidence would be quoting the app to
+    // itself. The evidence gate compares against this same filtered thread.
+    const sorted = [...threadMessages].sort(
       (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
     );
     const thread = sorted
@@ -436,7 +444,7 @@ export async function classifyLeadState(
 
   const { state, evidenceRejected } = enforceLeadStateRules(
     withObservedFacts(result.parsed, input),
-    input.communications
+    messagesOnly(input.communications)
   );
 
   return { state, usage: result.usage, evidenceRejected };
@@ -454,13 +462,17 @@ export function withObservedFacts(
   input: {
     // Only the two fields actually read, so callers and tests are not forced
     // to construct a full ClassifyInput to compute a timestamp.
-    communications: { direction: string; created_at: string }[];
+    communications: CommunicationLike[];
     quotedAt?: string | null;
     todayLocal: string;
   }
 ): LeadState {
+  // Audit entries are outgoing and would otherwise become last_outbound_at,
+  // making a lead look freshly touched when nothing was sent. See
+  // isRealMessage.
+  const messages = messagesOnly(input.communications);
   const latest = (match: (d: string) => boolean): string | null => {
-    const times = input.communications
+    const times = messages
       .filter((c) => match(c.direction))
       .map((c) => new Date(c.created_at).getTime())
       .filter((t) => Number.isFinite(t));

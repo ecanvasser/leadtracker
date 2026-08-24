@@ -18,6 +18,7 @@ import {
   isOutbound,
   type BonzoCommunication,
   type BonzoProspect,
+  messagesOnly,
 } from "@/lib/bonzo/client";
 import { analyzeProspect } from "@/lib/insights/analyze";
 import { draftQuoted } from "@/lib/jobs/draft-quoted";
@@ -129,14 +130,27 @@ export const refreshCache: JobHandler = async (supabase, job) => {
 
   // Bonzo API reads only — no model involvement on this path.
   const communications = await getCommunicationHistory(contact.bonzo_prospect_id);
-  const newest = newestMessageAt(communications);
-  const hasNew = hasNewMessages(communications, cache?.last_message_at);
+  /*
+   * Every watermark below is computed from real messages only. Bonzo's
+   * communication feed interleaves audit entries — "Person moved to
+   * <campaign> campaign" — which arrive as outgoing, and counting them made a
+   * campaign enrolment look like a message to the lead: it moved
+   * last_message_at, it made hasNew true, and it reset the silence clock that
+   * decides whether a follow-up is owed.
+   *
+   * The raw list is still what gets cached, because the contact page's
+   * conversation view shows those entries and they are useful context there.
+   * What must not see them is anything that measures time or writes prose.
+   */
+  const messages = messagesOnly(communications);
+  const newest = newestMessageAt(messages);
+  const hasNew = hasNewMessages(messages, cache?.last_message_at);
 
   // An inbound reply is the highest-value signal in the system. It is tracked
   // separately from last_message_at because an outbound send moves that
   // watermark, and a reply arriving afterwards would otherwise be missed.
   const newestInbound = newestMessageAt(
-    communications.filter((c) => isInbound(c.direction))
+    messages.filter((c) => isInbound(c.direction))
   );
   const previousInbound = cache?.last_inbound_at
     ? new Date(cache.last_inbound_at).getTime()
@@ -150,7 +164,7 @@ export const refreshCache: JobHandler = async (supabase, job) => {
   // Needs Quote lead would otherwise have an inbound watermark and no
   // outbound one — and whose-turn is a comparison between the two.
   const newestOutbound = newestMessageAt(
-    communications.filter((c) => isOutbound(c.direction))
+    messages.filter((c) => isOutbound(c.direction))
   );
 
   const watermarks = {

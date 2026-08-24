@@ -225,6 +225,62 @@ export function isOutbound(direction: string | null | undefined): boolean {
   return OUTBOUND_WORDS.has(String(direction ?? "").trim().toLowerCase());
 }
 
+/**
+ * Is this a real message, or one of Bonzo's audit entries?
+ *
+ * The communication feed interleaves messages with a running log of what has
+ * been done to the prospect — "Person moved to <campaign> campaign", "Action
+ * skipped: action template has no target configured". They arrive with
+ * `source: "update"`, an absent or empty `type`, and `direction: "outgoing"`,
+ * which means every outbound calculation in the app counted them: the last-
+ * message watermark, the silence clock, the consecutive-touch count, and the
+ * ten verbatim outbound messages used as drafting style exemplars.
+ *
+ * That produced a self-defeating loop. Enrolling a lead in a campaign wrote an
+ * audit entry, the entry became the newest outbound "message", and the
+ * drafting hold-off then suppressed the follow-up draft for a thread that had
+ * been silent for days — the rule cancelling its own reason for existing.
+ *
+ * Tests only for the audit marker, rather than requiring a recognised `type`.
+ * The two failure directions are not equal. Letting an unrecognised audit
+ * entry through quietly resets a clock and suppresses a follow-up. Excluding
+ * something that *is* a message makes the app believe a lead is quieter than
+ * they are and chase someone who just replied — the uncoordinated second touch
+ * this whole phase exists to avoid.
+ *
+ * The stricter version of this, "must carry a known type", was written first
+ * and dropped every message in a payload where the field was absent. That is
+ * the failure worth designing against, so the test stays as narrow as the
+ * evidence: `source: "update"` is what Bonzo actually marks these with, across
+ * all 51 of them in the cache, and nothing else shares it.
+ */
+export function isRealMessage(
+  c: { source?: string | null; [key: string]: unknown } | null | undefined
+): boolean {
+  if (!c) return false;
+  return String(c.source ?? "").trim().toLowerCase() !== "update";
+}
+
+/**
+ * The minimum shape a timing calculation needs. Declared here so callers that
+ * only care about direction and time still carry the two fields
+ * {@link isRealMessage} reads — narrowing them away is what let audit entries
+ * into every watermark in the first place.
+ */
+export interface CommunicationLike {
+  direction: string;
+  created_at: string;
+  type?: string | null;
+  source?: string | null;
+}
+
+/** {@link isRealMessage} over a list. */
+export function messagesOnly<T extends { source?: string | null }>(
+  list: readonly T[] | null | undefined
+): T[] {
+  return (list ?? []).filter(isRealMessage);
+}
+
 export interface BonzoCommunication {
   id: number;
   content: string | null;
