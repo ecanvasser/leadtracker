@@ -23,7 +23,12 @@ import {
 import { analyzeProspect } from "@/lib/insights/analyze";
 import { draftQuoted } from "@/lib/jobs/draft-quoted";
 import type { Job } from "@/lib/jobs/queue";
-import { classifyLeadState, shouldClassify, type LeadState } from "@/lib/insights/lead-state";
+import {
+  classifyLeadState,
+  shouldClassify,
+  CLASSIFY_PROMPT_VERSION,
+  type LeadState,
+} from "@/lib/insights/lead-state";
 import { getUserTimezone, localDate, leadAgeDays } from "@/lib/time";
 import { enqueueJob } from "@/lib/jobs/queue";
 import { scanForCallCommitments, recordProposedCall } from "@/lib/calls/scan";
@@ -123,7 +128,7 @@ export const refreshCache: JobHandler = async (supabase, job) => {
   const { data: cache } = await supabase
     .from("insights_cache")
     .select(
-      "ai_analysis, last_message_at, last_inbound_at, last_outbound_at, bonzo_prospect_data, lead_state, lead_state_at, calls_scanned_through"
+      "ai_analysis, last_message_at, last_inbound_at, last_outbound_at, bonzo_prospect_data, lead_state, lead_state_at, lead_state_prompt_version, calls_scanned_through"
     )
     .eq("contact_id", contactId)
     .maybeSingle();
@@ -187,7 +192,22 @@ export const refreshCache: JobHandler = async (supabase, job) => {
    * `!hasNew && cache?.ai_analysis` shape would have sent all of them
    * straight into the classifier on the first tick.
    */
-  const needsModelWork = eligible && (hasNew || !cache?.ai_analysis);
+  /*
+   * Whether the classifier is due, decided before the gate rather than after
+   * it. It used to be consulted further down, below the early return — which
+   * meant its interval rule was unreachable for exactly the leads it was
+   * written for. A quiet lead with an existing analysis returned early every
+   * time, so the "twice a day" classification the comment below promises
+   * never happened, and a prompt change could not reach a lead who had
+   * stopped talking.
+   */
+  const due = shouldClassify({
+    hasNewInbound,
+    lastClassifiedAt: cache?.lead_state_at as string | null | undefined,
+    promptVersion: (cache?.lead_state_prompt_version as string | null) ?? null,
+  });
+
+  const needsModelWork = eligible && (hasNew || !cache?.ai_analysis || due.classify);
 
   if (!needsModelWork) {
     // Record what we saw and stop before the model. The upsert rather than an
@@ -244,11 +264,6 @@ export const refreshCache: JobHandler = async (supabase, job) => {
    * classifier runs twice a day — or immediately when the prospect actually
    * said something, which is the only event that changes what they think.
    */
-  const due = shouldClassify({
-    hasNewInbound,
-    lastClassifiedAt: cache?.lead_state_at as string | null | undefined,
-  });
-
   const [aiAnalysis, classification] = await Promise.all([
     analyzeProspect(resolved, communications, notes),
     !due.classify
@@ -308,6 +323,9 @@ export const refreshCache: JobHandler = async (supabase, job) => {
         ? {
             lead_state: classification.state,
             lead_state_at: new Date().toISOString(),
+            // Stamped with the prompt that produced it, so the next change to
+            // that prompt invalidates this read rather than inheriting it.
+            lead_state_prompt_version: CLASSIFY_PROMPT_VERSION,
           }
         : {}),
       generated_at: new Date().toISOString(),

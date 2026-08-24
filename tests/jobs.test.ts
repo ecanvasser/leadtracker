@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { CLASSIFY_PROMPT_VERSION } from "@/lib/insights/lead-state";
 import { backoffMs, MAX_ATTEMPTS, failJob, deferJob, type Job } from "@/lib/jobs/queue";
 import { hasNewMessages, newestMessageAt } from "@/lib/jobs/handlers";
 
@@ -385,6 +386,15 @@ describe("refresh_cache cost guard", () => {
                           ai_analysis: { status_read: "cached" },
                           last_message_at: "2026-08-20T10:00:00Z",
                           bonzo_prospect_data: {},
+                          /*
+                           * The steady state this rule is actually about: a
+                           * lead already classified, by the prompt currently
+                           * in force. Without these the row reads as never
+                           * classified, and a first classification is not the
+                           * cost bug C1 exists to catch.
+                           */
+                          lead_state_at: new Date().toISOString(),
+                          lead_state_prompt_version: CLASSIFY_PROMPT_VERSION,
                         },
                         error: null,
                       },

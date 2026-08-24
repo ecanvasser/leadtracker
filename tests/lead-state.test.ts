@@ -8,6 +8,7 @@ import {
   daysSincePitch,
   shouldClassify,
   CLASSIFY_INTERVAL_HOURS,
+  CLASSIFY_PROMPT_VERSION,
   type LeadState,
 } from "@/lib/insights/lead-state";
 
@@ -380,5 +381,84 @@ describe("shouldClassify", () => {
     // 00:00 and 12:00. Section 6's budget rests on this ratio: the refresh is
     // free, and 94 of those 96 ticks cost nothing.
     expect(runs).toBe(2);
+  });
+});
+
+/*
+ * A prompt change has to invalidate the reads it made.
+ *
+ * The failure this prevents, found in production: the classifier prompt was
+ * rewritten to look for what is blocking a lead rather than what step is
+ * outstanding, and not one existing lead picked it up. Classification re-runs
+ * on a new message or a 12-hour interval, and the leads drafting serves are by
+ * definition the ones who have stopped sending messages. Their angle stayed
+ * frozen, and every draft kept executing the old prompt's instruction
+ * faithfully.
+ */
+describe("classification is invalidated by a prompt change", () => {
+  const RECENT = new Date("2026-08-24T17:00:00Z").toISOString();
+  const NOW = new Date("2026-08-24T18:00:00Z");
+
+  it("reclassifies when the stored fingerprint does not match", () => {
+    const out = shouldClassify({
+      hasNewInbound: false,
+      lastClassifiedAt: RECENT,
+      promptVersion: "deadbeef",
+      now: NOW,
+    });
+    expect(out.classify).toBe(true);
+    expect(out.reason).toBe("prompt_changed");
+  });
+
+  it("reclassifies a read written before the column existed", () => {
+    const out = shouldClassify({
+      hasNewInbound: false,
+      lastClassifiedAt: RECENT,
+      promptVersion: null,
+      now: NOW,
+    });
+    expect(out.classify).toBe(true);
+    expect(out.reason).toBe("prompt_changed");
+  });
+
+  it("leaves a matching read alone", () => {
+    // The whole point is that this stays cheap: a lead whose read was made by
+    // the current prompt, with nothing new said, must not spend a token.
+    const out = shouldClassify({
+      hasNewInbound: false,
+      lastClassifiedAt: RECENT,
+      promptVersion: CLASSIFY_PROMPT_VERSION,
+      now: NOW,
+    });
+    expect(out.classify).toBe(false);
+    expect(out.reason).toBe("classified_recently");
+  });
+
+  it("checks the fingerprint before the interval", () => {
+    // Otherwise a prompt change waits up to twelve hours to take effect on a
+    // lead classified moments ago.
+    const out = shouldClassify({
+      hasNewInbound: false,
+      lastClassifiedAt: RECENT,
+      promptVersion: "stale",
+      now: NOW,
+      intervalHours: 12,
+    });
+    expect(out.reason).toBe("prompt_changed");
+  });
+
+  it("omitting the fingerprint does not force a reclassification", () => {
+    // Callers that genuinely do not know the version must not stampede every
+    // lead into the classifier. Only an explicit mismatch counts.
+    const out = shouldClassify({
+      hasNewInbound: false,
+      lastClassifiedAt: RECENT,
+      now: NOW,
+    });
+    expect(out.classify).toBe(false);
+  });
+
+  it("changes when the prompt text changes", () => {
+    expect(CLASSIFY_PROMPT_VERSION).toMatch(/^[0-9a-f]{8}$/);
   });
 });

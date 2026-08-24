@@ -390,6 +390,34 @@ export function daysSincePitch(
 export const CLASSIFY_INTERVAL_HOURS = 12;
 
 /**
+ * A short fingerprint of the classifier's system prompt.
+ *
+ * Stored alongside each cached read so a prompt change invalidates the reads
+ * it made. Without it, improving the prompt cannot reach the leads it was
+ * written for: classification re-runs on a new message or a 12-hour interval,
+ * and the leads drafting exists to serve are precisely the ones who have gone
+ * quiet — so their angle stays frozen at whatever the previous prompt thought
+ * a good angle was.
+ *
+ * Derived from the prompt text rather than a hand-maintained integer, because
+ * a version number that must be remembered is a version number that will be
+ * forgotten in exactly the commit that needed it. The cost of the trade is
+ * that a whitespace edit also invalidates — one reclassification per eligible
+ * lead, which at this volume is pennies and is the safe direction anyway.
+ *
+ * FNV-1a rather than node:crypto so this module stays importable from
+ * anywhere; LeadState is a type that client components read.
+ */
+function fingerprint(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0");
+}
+
+/**
  * Whether a lead is due for classification.
  *
  * Assumes the caller has already established that something is new — the
@@ -405,9 +433,13 @@ export const CLASSIFY_INTERVAL_HOURS = 12;
  *   - Otherwise, twice daily. New outbound activity alone is Eddie sending
  *     something; it does not change what the lead thinks.
  */
+export const CLASSIFY_PROMPT_VERSION = fingerprint(CLASSIFY_SYSTEM);
+
 export function shouldClassify(opts: {
   hasNewInbound: boolean;
   lastClassifiedAt: string | null | undefined;
+  /** The fingerprint stored with the cached read; null on rows predating it. */
+  promptVersion?: string | null;
   now?: Date;
   intervalHours?: number;
 }): { classify: boolean; reason: string } {
@@ -417,6 +449,16 @@ export function shouldClassify(opts: {
 
   if (!lastClassifiedAt) return { classify: true, reason: "never_classified" };
   if (hasNewInbound) return { classify: true, reason: "new_inbound" };
+
+  /*
+   * Checked before the interval, so a prompt change takes effect on the next
+   * sweep rather than waiting up to twelve hours. A row written before this
+   * column existed has a null version and reclassifies once, which is correct
+   * — it was written by a prompt we can no longer identify.
+   */
+  if (opts.promptVersion !== undefined && opts.promptVersion !== CLASSIFY_PROMPT_VERSION) {
+    return { classify: true, reason: "prompt_changed" };
+  }
 
   const last = new Date(lastClassifiedAt).getTime();
   if (!Number.isFinite(last)) {
