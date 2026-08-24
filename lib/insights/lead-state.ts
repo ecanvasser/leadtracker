@@ -168,6 +168,10 @@ DOING NOTHING IS A VALID ANSWER. If nothing has changed and there is no reason t
 
 SUGGESTED_ANGLE IS NOT A MESSAGE. One line naming what to lead with, addressed to the broker, not to the prospect. "She asked about closing costs, not rate — lead with the lender credit." Not "Hi Dana, I wanted to follow up...". He writes the message himself; you tell him what to raise. If you have nothing specific, say what is missing rather than filling the space.
 
+THE ANGLE IS A BLOCKER, NOT A NEXT STEP. A lead who has been quoted and gone quiet is almost never stuck on a logistical step. Something is holding them back, and it is one of three things: an internal battle where committing feels risky and the outcome is unclear to them; money, which they either do not have or do not want to spend on this; or a better promise from another lender, which may not be true but which they believe. Name which of the three the evidence points at, and say what would get them to admit it.
+
+"Confirm whether he paid the fee" is not an angle — it is a status check the broker can look up himself, and it is answerable with one word. "He agreed to pay, then went silent on timeline — that reads as cold feet about the cost, not a broken link" is an angle. Silence straight after a number points at money or a competitor. Silence after they agreed to something points at hesitation. Silence after a question about a specific term points at something they were told elsewhere.
+
 Return only the JSON object.`;
 
 export interface ClassifyInput {

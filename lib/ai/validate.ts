@@ -52,6 +52,18 @@ export const BANNED_PHRASES = [
   "lets get you",
   "no pressure",
   "quick question!",
+  /*
+   * Status-check openers. Banned as phrases rather than left to the prompt
+   * because they are the exact shape of the wasted message: answerable with
+   * one word, about something the broker can look up himself, and they let a
+   * lead who is actually blocked on money or a competing offer say "not yet"
+   * and stay blocked. No legitimate draft in this window needs one.
+   */
+  "did you get a chance",
+  "any update on",
+  "just wanted to see if",
+  "checking to see if",
+  "wanted to check if",
 ];
 
 export interface DraftContext {

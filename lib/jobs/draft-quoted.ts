@@ -250,26 +250,24 @@ export const draftQuoted: JobHandler = async (supabase, job) => {
   if (queueErr) throw queueErr;
 
   /*
-   * Dry run stops here. The row exists and can be read on /daily, but no card
-   * goes to the phone — a card with no Send button that arrives at 7am is a
-   * notification Eddie cannot act on, and the point of dry run is to look at
-   * the drafts deliberately rather than be interrupted by them.
+   * Dry run pushes too, as a read-only card.
+   *
+   * This used to stop here on the reasoning that a card with no Send button
+   * is a notification Eddie cannot act on. That was wrong twice over. The
+   * point of dry run is to judge whether the drafts sound like him, and he
+   * cannot judge what he never sees — Telegram is where he actually reads
+   * things, and a row on /daily requires him to be at a desk and remember to
+   * look. The rest of the code already assumed this: buildCardInput sets
+   * readOnly whenever drafting is not live, and the keyboard renders that as
+   * Dismiss with no Send and no Edit. The card was built and nothing sent it.
    */
-  if (settings.mode === "dry_run") {
-    return {
-      summary:
-        `drafted for ${contact.name} (dry run, not pushed)` +
-        (result.validated ? "" : ` — unvalidated: ${result.violations.length} issues`),
-      usedModel: true,
-    };
-  }
-
   const { pushCard } = await import("@/lib/telegram/push");
   const push = await pushCard(supabase, contact.user_id, queued.id);
 
   return {
     summary:
       `drafted for ${contact.name}` +
+      (settings.mode === "dry_run" ? " (dry run)" : "") +
       (result.validated ? "" : ` — unvalidated: ${result.violations.length} issues`) +
       (push.pushed ? "; pushed" : `; not pushed (${push.reason})`),
     usedModel: true,

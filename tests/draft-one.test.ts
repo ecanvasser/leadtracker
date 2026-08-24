@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { BANNED_PHRASES } from "@/lib/ai/validate";
 import type { BonzoCommunication, BonzoProspect } from "@/lib/bonzo/client";
 
 /**
@@ -233,5 +236,73 @@ describe("draftOne retry policy", () => {
       messages: { content: string }[];
     };
     expect(call.messages[0].content).toContain("Do not state any figure at all");
+  });
+});
+
+/*
+ * The blocker framing.
+ *
+ * Eddie's correction after reading the first real draft, which asked whether a
+ * $126 lock fee had gone through: "Asking if the payment went through is kind
+ * of dumb. This guy said he would pay, then didn't respond to my last message
+ * about what his timeline was. What does that tell us? There's something most
+ * likely holding him back."
+ *
+ * The draft was not badly written — it was aimed at the wrong thing. It
+ * treated a quiet lead as a logistics problem, when a lead who has been quoted
+ * and gone silent is a blocker problem: an internal battle, money, or a better
+ * promise from someone else. The message's job is to surface which.
+ *
+ * Asserted against the prompt text because a prompt is the only place this
+ * behaviour lives, and a later trim for brevity would silently take the theory
+ * out with it.
+ */
+describe("the drafting prompt's theory of a quiet lead", () => {
+  const prompt = readFileSync(
+    resolve(process.cwd(), "lib/ai/draft-one.ts"),
+    "utf8"
+  );
+
+  it("names all three blockers", () => {
+    expect(prompt).toMatch(/internal battle/i);
+    expect(prompt).toMatch(/Money\. They do not have it/i);
+    expect(prompt).toMatch(/better promise/i);
+  });
+
+  it("tells the model a status check is a wasted message", () => {
+    expect(prompt).toMatch(/ASKING THE STATUS OF A STEP IS A WASTED MESSAGE/);
+    // The specific example that prompted this.
+    expect(prompt).toMatch(/did the payment go through/i);
+  });
+
+  it("forbids offering to cover a cost", () => {
+    // A standing rule, not a stylistic preference: he does not pay his
+    // clients' costs and a draft that hints he might is worse than no draft.
+    expect(prompt).toMatch(/NEVER OFFER TO COVER ANYTHING/);
+  });
+
+  it("carries the same theory into the classifier's angle", () => {
+    // The angle feeds the draft. If the classifier still suggests "confirm
+    // whether he paid", the draft is fighting its own input.
+    const classify = readFileSync(
+      resolve(process.cwd(), "lib/insights/lead-state.ts"),
+      "utf8"
+    );
+    expect(classify).toMatch(/THE ANGLE IS A BLOCKER, NOT A NEXT STEP/);
+    expect(classify).toMatch(/is not an angle/i);
+  });
+});
+
+describe("status-check openers are banned outright", () => {
+  it("rejects the shapes that let a blocked lead say 'not yet'", () => {
+    for (const phrase of [
+      "did you get a chance",
+      "any update on",
+      "just wanted to see if",
+      "checking to see if",
+      "wanted to check if",
+    ]) {
+      expect(BANNED_PHRASES).toContain(phrase);
+    }
   });
 });
