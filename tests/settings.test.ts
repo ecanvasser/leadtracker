@@ -117,3 +117,49 @@ describe("validateCadenceConfig", () => {
     expect(validateCadenceConfig({ unresponsive_max_consecutive: 50 })).toContain("between");
   });
 });
+
+/*
+ * The drafting controls.
+ *
+ * These shipped as columns with no way to set them — the engine, the schedule
+ * and the validator were all built and drafting could only be switched on in
+ * the SQL editor. Now that Settings writes them, the route is the last thing
+ * standing between a typo and prose going to a client, so each bound is
+ * asserted rather than trusted to the database.
+ */
+describe("drafting settings", () => {
+  it("accepts only the three ladder states", () => {
+    expect(validateField("drafting_mode", "off")).toBeNull();
+    expect(validateField("drafting_mode", "dry_run")).toBeNull();
+    expect(validateField("drafting_mode", "live")).toBeNull();
+    expect(validateField("drafting_mode", "on")).toBeTruthy();
+    expect(validateField("drafting_mode", true)).toBeTruthy();
+  });
+
+  it("requires a schedule with at least one reachable slot", () => {
+    expect(validateField("draft_schedule_hours", [3, 24])).toBeNull();
+    expect(validateField("draft_schedule_hours", [])).toBeTruthy();
+    // D5 caps the window at two days and forbids two drafts in one day, so
+    // more than four slots cannot all fire. Rejecting beats silently ignoring.
+    expect(validateField("draft_schedule_hours", [1, 2, 3, 4, 5])).toBeTruthy();
+    expect(validateField("draft_schedule_hours", [3.5])).toBeTruthy();
+    expect(validateField("draft_schedule_hours", [-1])).toBeTruthy();
+    expect(validateField("draft_schedule_hours", "3, 24")).toBeTruthy();
+  });
+
+  it("holds the redraft cap inside the column's own constraint", () => {
+    // Matching the check constraint here turns a Postgres violation into a
+    // sentence Eddie can read.
+    expect(validateField("max_redrafts_per_day", 3)).toBeNull();
+    expect(validateField("max_redrafts_per_day", 0)).toBeNull();
+    expect(validateField("max_redrafts_per_day", 21)).toBeTruthy();
+    expect(validateField("max_redrafts_per_day", -1)).toBeTruthy();
+  });
+
+  it("bounds the hold-off window", () => {
+    expect(validateField("min_hours_since_last_message", 6)).toBeNull();
+    expect(validateField("min_hours_since_last_message", 0)).toBeNull();
+    expect(validateField("min_hours_since_last_message", 169)).toBeTruthy();
+    expect(validateField("min_hours_since_last_message", 2.5)).toBeTruthy();
+  });
+});

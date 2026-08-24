@@ -26,6 +26,12 @@ const WRITABLE = [
   "working_hours_end",
   "daily_token_budget",
   "cadence_config",
+  // Phase 8 6A. Drafting is the only part of the app that writes prose to a
+  // client, so its controls are writable here rather than SQL-only.
+  "drafting_mode",
+  "draft_schedule_hours",
+  "max_redrafts_per_day",
+  "min_hours_since_last_message",
 ] as const;
 
 type WritableField = (typeof WRITABLE)[number];
@@ -134,6 +140,46 @@ export function validateField(
         return `${field.replace(/_/g, " ")} must be a time like 08:00`;
       }
       return null;
+
+    case "drafting_mode":
+      if (value !== "off" && value !== "dry_run" && value !== "live") {
+        return "drafting mode must be off, dry_run or live";
+      }
+      return null;
+
+    case "draft_schedule_hours": {
+      if (!Array.isArray(value) || value.length === 0) {
+        return "the draft schedule needs at least one slot";
+      }
+      if (value.length > 4) {
+        // D5 caps the window at two days and forbids two drafts in one day, so
+        // more than four slots cannot all be reachable. Rejecting is clearer
+        // than silently never firing the extras.
+        return "at most four slots";
+      }
+      if (!value.every((h) => Number.isInteger(h) && h >= 0 && h <= 336)) {
+        return "each slot must be a whole number of hours between 0 and 336";
+      }
+      return null;
+    }
+
+    case "max_redrafts_per_day": {
+      const n = Number(value);
+      // Matches the check constraint on the column; rejecting here gives a
+      // readable message instead of a Postgres violation.
+      if (!Number.isInteger(n) || n < 0 || n > 20) {
+        return "redrafts per day must be between 0 and 20";
+      }
+      return null;
+    }
+
+    case "min_hours_since_last_message": {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 0 || n > 168) {
+        return "quiet hours before a draft must be between 0 and 168";
+      }
+      return null;
+    }
 
     case "daily_token_budget": {
       const n = Number(value);

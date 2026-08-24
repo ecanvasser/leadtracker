@@ -6,6 +6,11 @@ import {
   GeneralSettings,
   type UserSettings,
 } from "@/components/settings/general-settings";
+import {
+  DraftingSettingsPanel,
+  type DraftingSettings,
+  type DraftingMode,
+} from "@/components/settings/drafting-settings";
 import { resolveCadenceConfig } from "@/lib/cadence/config";
 import { modelFor } from "@/lib/ai/models";
 import { localDateFor } from "@/lib/time";
@@ -62,6 +67,15 @@ export default async function SettingsPage() {
     cadence_config: resolveCadenceConfig(settings?.cadence_config),
   };
 
+  const drafting: DraftingSettings = {
+    // Absent settings mean off, matching readDraftSettings. A missing row must
+    // never render as though drafting were on.
+    drafting_mode: (settings?.drafting_mode as DraftingMode) ?? "off",
+    draft_schedule_hours: settings?.draft_schedule_hours ?? [3, 24],
+    max_redrafts_per_day: settings?.max_redrafts_per_day ?? 3,
+    min_hours_since_last_message: settings?.min_hours_since_last_message ?? 6,
+  };
+
   return (
     <div className="max-w-2xl mx-auto p-6 space-y-8">
       <div>
@@ -79,6 +93,8 @@ export default async function SettingsPage() {
         }}
         todaySpend={{ inputTokens, outputTokens, calls }}
       />
+
+      <DraftingSettingsPanel initial={drafting} />
 
       <TelegramSettings userId={userId} initialLink={link} />
     </div>
