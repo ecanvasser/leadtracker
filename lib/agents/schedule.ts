@@ -11,7 +11,7 @@
  * not whether it is welcome.
  */
 
-import { localDate } from "@/lib/time";
+import { addLocalDays, localDate, startOfLocalDayUtc } from "@/lib/time";
 import type { AgentPlan, AgentStatus, TouchStatus } from "@/lib/agents/types";
 
 export interface TouchDueInput {
@@ -103,17 +103,46 @@ export function touchDue(input: TouchDueInput): TouchDueResult {
 }
 
 /**
+ * The local hour a touch becomes due.
+ *
+ * Mid-morning: clear of the 8am digest, well inside working hours, and a
+ * reasonable time to text someone about their mortgage.
+ */
+export const TOUCH_HOUR_LOCAL = 10;
+
+/**
  * Turns an activated plan into scheduled touch rows.
  *
  * Days are counted from activation rather than from deployment, so a plan
  * built in the morning and activated that evening still gets its full spacing.
+ *
+ * The time of day is fixed rather than inherited from the activation instant.
+ * Inheriting it meant an agent deployed at 10:57pm had every touch due at
+ * 10:57pm — outside working hours, so every one was deferred to the next
+ * morning and the whole plan quietly ran a day later than it read. "Day 3"
+ * should mean the morning of day 3, not whenever the deploy button happened to
+ * be pressed.
+ *
+ * Resolved through the broker's local calendar, so a plan spanning a DST
+ * change keeps landing at the same wall-clock hour rather than drifting.
  */
 export function scheduleTouches(
   plan: AgentPlan,
-  activatedAt: Date
+  activatedAt: Date,
+  timeZone: string,
+  hour: number = TOUCH_HOUR_LOCAL
 ): { step_index: number; due_at: string }[] {
-  return plan.steps.map((s) => ({
-    step_index: s.step,
-    due_at: new Date(activatedAt.getTime() + s.day * 86_400_000).toISOString(),
-  }));
+  const startDate = localDate(activatedAt, timeZone);
+
+  return plan.steps.map((s) => {
+    const dueDate = addLocalDays(startDate, s.day);
+    const midnight = startOfLocalDayUtc(dueDate, timeZone);
+    return {
+      step_index: s.step,
+      // Hours added to the resolved local midnight. On the two DST days a year
+      // this lands an hour either side of the target, which does not matter
+      // for a follow-up text.
+      due_at: new Date(midnight.getTime() + hour * 3_600_000).toISOString(),
+    };
+  });
 }

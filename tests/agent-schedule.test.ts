@@ -1,7 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { touchDue, scheduleTouches } from "@/lib/agents/schedule";
+import {
+  touchDue,
+  scheduleTouches,
+  TOUCH_HOUR_LOCAL,
+} from "@/lib/agents/schedule";
+import { localDate } from "@/lib/time";
 import { normalizePlan, MIN_STEPS, MAX_STEPS } from "@/lib/agents/plan";
 import type { AgentPlan } from "@/lib/agents/types";
 
@@ -90,17 +95,55 @@ describe("touchDue", () => {
 });
 
 describe("scheduleTouches", () => {
-  it("counts days from activation, not from deployment", () => {
-    const plan: AgentPlan = {
+  const LA = "America/Los_Angeles";
+  const plan: AgentPlan = {
+    summary: "s",
+    steps: [
+      { step: 1, day: 1, hypothesis: "risk", angle: "a", rationale: "r" },
+      { step: 2, day: 4, hypothesis: "money", angle: "b", rationale: "r" },
+    ],
+  };
+
+  /** The wall-clock hour a due timestamp lands on, in the broker's zone. */
+  const localHour = (iso: string) =>
+    Number(
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: LA,
+        hour: "numeric",
+        hour12: false,
+      }).format(new Date(iso))
+    );
+
+  it("counts days from activation and lands mid-morning", () => {
+    // Activated 09:00 local.
+    const out = scheduleTouches(plan, new Date("2026-08-25T16:00:00Z"), LA);
+    expect(localHour(out[0].due_at)).toBe(TOUCH_HOUR_LOCAL);
+    expect(localHour(out[1].due_at)).toBe(TOUCH_HOUR_LOCAL);
+    expect(localDate(new Date(out[0].due_at), LA)).toBe("2026-08-26");
+    expect(localDate(new Date(out[1].due_at), LA)).toBe("2026-08-29");
+  });
+
+  it("does not inherit the hour the deploy button was pressed", () => {
+    /*
+     * The bug this fixes. An agent activated at 10:57pm had every touch due at
+     * 10:57pm — outside working hours, so each was deferred to the next
+     * morning and the plan quietly ran a day later than it read.
+     */
+    const lateNight = new Date("2026-08-25T05:57:48Z"); // 22:57 local, Aug 24
+    const out = scheduleTouches(plan, lateNight, LA);
+    expect(localHour(out[0].due_at)).toBe(TOUCH_HOUR_LOCAL);
+    // Day 1 from the local calendar date of activation (Aug 24), not +24h.
+    expect(localDate(new Date(out[0].due_at), LA)).toBe("2026-08-25");
+  });
+
+  it("keeps the same wall-clock hour across a DST change", () => {
+    // Activated in PDT, step lands after the November transition into PST.
+    const long: AgentPlan = {
       summary: "s",
-      steps: [
-        { step: 1, day: 1, hypothesis: "risk", angle: "a", rationale: "r" },
-        { step: 2, day: 4, hypothesis: "money", angle: "b", rationale: "r" },
-      ],
+      steps: [{ step: 1, day: 14, hypothesis: "risk", angle: "a", rationale: "r" }],
     };
-    const out = scheduleTouches(plan, new Date("2026-08-25T00:00:00Z"));
-    expect(out[0].due_at).toBe("2026-08-26T00:00:00.000Z");
-    expect(out[1].due_at).toBe("2026-08-29T00:00:00.000Z");
+    const out = scheduleTouches(long, new Date("2026-10-25T17:00:00Z"), LA);
+    expect(localHour(out[0].due_at)).toBe(TOUCH_HOUR_LOCAL);
   });
 });
 

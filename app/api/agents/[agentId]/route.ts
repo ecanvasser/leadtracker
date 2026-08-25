@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
-import { scheduleTouches } from "@/lib/agents/schedule";
+import { scheduleTouches, TOUCH_HOUR_LOCAL } from "@/lib/agents/schedule";
+import { addLocalDays, localDate, startOfLocalDayUtc, getUserTimezone } from "@/lib/time";
 import type { AgentPlan } from "@/lib/agents/types";
 
 type Action = "activate" | "pause" | "resume" | "retire";
@@ -44,6 +45,7 @@ export async function PATCH(
   if (!agent) return NextResponse.json({ error: "Agent not found" }, { status: 404 });
 
   const now = new Date();
+  const timeZone = await getUserTimezone(userId, service);
 
   if (action === "activate") {
     if (agent.status !== "draft") {
@@ -65,7 +67,7 @@ export async function PATCH(
      * active with nothing scheduled — a live agent that silently never acts,
      * which is worse than one that failed to start.
      */
-    const rows = scheduleTouches(plan, now).map((t) => ({
+    const rows = scheduleTouches(plan, now, timeZone).map((t) => ({
       agent_id: agent.id,
       user_id: userId,
       contact_id: agent.contact_id,
@@ -144,17 +146,28 @@ export async function PATCH(
     }
 
     const firstDay = remaining[0].day;
-    const rows = remaining.map((s) => ({
-      agent_id: agent.id,
-      user_id: userId,
-      contact_id: agent.contact_id,
-      step_index: s.step,
-      // Rebased so the next step is due now and the rest keep their spacing.
-      due_at: new Date(now.getTime() + (s.day - firstDay) * 86_400_000).toISOString(),
-      status: "pending",
-      note: null,
-      settled_at: null,
-    }));
+    const today = localDate(now, timeZone);
+    const rows = remaining.map((s) => {
+      /*
+       * Rebased so the next step is due today and the rest keep their original
+       * spacing — and landed at the same fixed local hour as a fresh schedule,
+       * rather than at whatever moment Resume was pressed.
+       */
+      const dueDate = addLocalDays(today, s.day - firstDay);
+      const midnight = startOfLocalDayUtc(dueDate, timeZone);
+      return {
+        agent_id: agent.id,
+        user_id: userId,
+        contact_id: agent.contact_id,
+        step_index: s.step,
+        due_at: new Date(
+          midnight.getTime() + TOUCH_HOUR_LOCAL * 3_600_000
+        ).toISOString(),
+        status: "pending",
+        note: null,
+        settled_at: null,
+      };
+    });
 
     const { error: touchErr } = await service
       .from("contact_agent_touches")
