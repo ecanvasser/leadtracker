@@ -246,3 +246,46 @@ describe("holding off while the conversation is warm", () => {
     expect(out.reason).toContain("yours to write");
   });
 });
+
+/*
+ * The fresh read before drafting.
+ *
+ * Everything the due check reads comes from insights_cache, which the refresh
+ * sweep updates every fifteen minutes. Good enough to decide a lead is worth
+ * looking at; not good enough to decide to write to them. A lead who replied
+ * four minutes ago still looks silent in the cache, and the draft would land
+ * on top of a live conversation.
+ *
+ * These assert the decision the re-check makes, on the fresh values rather
+ * than the cached ones.
+ */
+describe("a reply that arrives after the cache was written", () => {
+  it("cancels a draft that the cached watermarks said was due", () => {
+    const cached = draftDue(
+      input({ stageChangedAt: hoursAgo(30), lastMessageAt: hoursAgo(30) })
+    );
+    expect(cached.due).toBe(true);
+
+    // Same lead, same moment, but Bonzo has a reply the cache had not seen.
+    const fresh = draftDue(
+      input({
+        stageChangedAt: hoursAgo(30),
+        lastMessageAt: hoursAgo(0.07),
+        lastInboundAt: hoursAgo(0.07),
+      })
+    );
+    expect(fresh.due).toBe(false);
+    expect(fresh.reason).toMatch(/replied/i);
+  });
+
+  it("cancels when the broker himself just sent something", () => {
+    // The case that surfaced this: stage moved to Quoted, then a message sent
+    // by hand seventeen minutes later. Nothing is owed nine minutes after that.
+    const fresh = draftDue(
+      input({ stageChangedAt: hoursAgo(0.4), lastMessageAt: hoursAgo(0.15) })
+    );
+    expect(fresh.due).toBe(false);
+    // The hold-off floor, reported in hours since the last message.
+    expect(fresh.reason).toMatch(/last message was .*h ago/i);
+  });
+});

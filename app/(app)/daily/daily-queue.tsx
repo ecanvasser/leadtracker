@@ -26,6 +26,7 @@ import {
   Keyboard,
   AlertTriangle,
   CalendarCheck,
+  Pencil,
 } from "lucide-react";
 import { LOAN_TYPE_LABELS, CRM_LABELS, type LoanType, type CRM } from "@/types/db";
 
@@ -947,6 +948,28 @@ export function DailyQueue() {
                     >
                       <Send className="h-4 w-4 mr-1.5" />
                       Send edited
+                    </Button>
+                  ) : !messageBody ? (
+                    /*
+                     * A "they replied" card never carries a draft — Phase 7
+                     * removed drafting from that path deliberately, so the
+                     * card exists to say someone is waiting, not to send
+                     * anything. Send here could only ever fail: the send path
+                     * refuses an empty body, correctly, which means the button
+                     * was offering an action that had no outcome.
+                     *
+                     * The card is still one tap from being useful, so this
+                     * opens the editor rather than disabling anything.
+                     */
+                    <Button
+                      className="flex-1"
+                      onClick={() => {
+                        setIsEditing(true);
+                        setEditedMessage("");
+                      }}
+                    >
+                      <Pencil className="h-4 w-4 mr-1.5" />
+                      Write reply
                     </Button>
                   ) : (
                     <Button

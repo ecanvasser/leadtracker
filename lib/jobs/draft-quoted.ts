@@ -19,9 +19,13 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { draftOne } from "@/lib/ai/draft-one";
 import { draftDue } from "@/lib/ai/draft-schedule";
 import {
+  getCommunicationHistory,
   getMortgageFields,
+  getProspect,
   isInbound,
   isOptedOut,
+  isOutbound,
+  messagesOnly,
   type BonzoCommunication,
   type BonzoProspect,
 } from "@/lib/bonzo/client";
@@ -174,8 +178,93 @@ export const draftQuoted: JobHandler = async (supabase, job) => {
     return { summary: `no draft due: ${due.reason}`, usedModel: false };
   }
 
-  const prospect = (cache?.bonzo_prospect_data as BonzoProspect | null) ?? null;
-  const communications = (cache?.bonzo_communication ?? []) as BonzoCommunication[];
+  /*
+   * Re-read Bonzo before drafting, and re-decide on what comes back.
+   *
+   * Everything above this point came from insights_cache, which the refresh
+   * sweep updates every fifteen minutes. That is fine for deciding whether a
+   * lead is worth looking at, and not fine for deciding to write to them. A
+   * lead who replied four minutes ago still looks silent in the cache, and the
+   * draft would land on top of a live conversation — the uncoordinated second
+   * touch this whole phase exists to avoid.
+   *
+   * Placed after the due check rather than before it so the extra API call is
+   * only spent on a lead we were about to spend a model call on anyway. One
+   * request, a handful of times a day.
+   *
+   * The fresh watermarks are written back, so a draft cancelled here also
+   * corrects the cache instead of letting the next tick repeat the same work.
+   */
+  let communications = (cache?.bonzo_communication ?? []) as BonzoCommunication[];
+  let prospect = (cache?.bonzo_prospect_data as BonzoProspect | null) ?? null;
+
+  if (contact.bonzo_prospect_id) {
+    try {
+      const [fresh, freshProspect] = await Promise.all([
+        getCommunicationHistory(contact.bonzo_prospect_id),
+        getProspect(contact.bonzo_prospect_id),
+      ]);
+      communications = fresh;
+      prospect = freshProspect ?? prospect;
+
+      const messages = messagesOnly(fresh);
+      const newest = (match: (d: string) => boolean): string | null => {
+        const times = messages
+          .filter((c) => match(c.direction))
+          .map((c) => new Date(c.created_at).getTime())
+          .filter((t) => Number.isFinite(t));
+        return times.length ? new Date(Math.max(...times)).toISOString() : null;
+      };
+      const freshInbound = newest(isInbound);
+      const freshOutbound = newest(isOutbound);
+      const freshLatest =
+        [freshInbound, freshOutbound]
+          .filter((v): v is string => v !== null)
+          .sort()
+          .at(-1) ?? null;
+
+      await supabase
+        .from("insights_cache")
+        .update({
+          bonzo_communication: fresh,
+          last_message_at: freshLatest,
+          last_inbound_at: freshInbound,
+          last_outbound_at: freshOutbound,
+          last_synced_at: new Date().toISOString(),
+        })
+        .eq("contact_id", contactId);
+
+      const recheck = draftDue({
+        stage: contact.stage as AllStages,
+        stageChangedAt: contact.stage_changed_at,
+        windowDays: await windowDaysFor(supabase, contact.user_id),
+        scheduleHours: settings.scheduleHours,
+        lastInboundAt: freshInbound,
+        lastMessageAt: freshLatest,
+        minHoursSinceLastMessage: settings.minHoursSinceLastMessage,
+        draftsGenerated: (generated ?? []).map((r) => r.created_at as string),
+        hasPendingDraft: (pending ?? []).length > 0,
+        now: new Date(),
+        timeZone,
+      });
+
+      if (!recheck.due) {
+        return {
+          summary: `no draft due after fresh read: ${recheck.reason}`,
+          usedModel: false,
+        };
+      }
+    } catch (e) {
+      /*
+       * A failed re-read is not a reason to draft from stale data. Bonzo being
+       * unavailable is exactly when the cache is least trustworthy, and the
+       * job retries.
+       */
+      throw e instanceof Error
+        ? e
+        : new Error("Bonzo re-read failed before drafting");
+    }
+  }
 
   /*
    * An opt-out bars a draft as surely as it bars a send.
