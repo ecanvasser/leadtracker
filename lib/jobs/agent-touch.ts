@@ -108,11 +108,22 @@ export const agentTouch: JobHandler = async (supabase, job) => {
     .eq("contact_id", contact.id)
     .maybeSingle();
 
+  /*
+   * Cards genuinely waiting on a decision — today's only.
+   *
+   * The guard exists so a lead never has two live cards at once. Scoped to
+   * today because a pending row from a previous day is not waiting on
+   * anything: /daily only renders today's queue and pushNextCard only pushes
+   * from it, so an older row is invisible to Eddie and abandoned by the app.
+   * Counting those meant 23 rows left behind by the retired cadence lane in
+   * August silently blocked every agent on five different leads.
+   */
   const { data: pending } = await supabase
     .from("daily_queue")
     .select("id")
     .eq("contact_id", contact.id)
     .eq("status", "pending")
+    .eq("queue_date", localDate(new Date(), settings.timeZone))
     .limit(1);
 
   const { data: generated } = await supabase

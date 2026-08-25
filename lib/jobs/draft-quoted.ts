@@ -152,12 +152,16 @@ export const draftQuoted: JobHandler = async (supabase, job) => {
       .eq("contact_id", contactId)
       .eq("action_type", DRAFT_GENERATED_ACTION)
       .order("created_at", { ascending: false }),
+    // Today's only, for the same reason as the agent path: a pending row from
+    // a previous day is not on the phone and not on /daily, so it is not
+    // waiting on a decision and must not block a new draft forever.
     supabase
       .from("daily_queue")
       .select("id")
       .eq("contact_id", contactId)
       .eq("priority_reason", QUOTED_DRAFT_REASON)
       .eq("status", "pending")
+      .eq("queue_date", today)
       .limit(1),
   ]);
 
