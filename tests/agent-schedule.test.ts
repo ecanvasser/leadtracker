@@ -184,10 +184,21 @@ describe("normalizePlan", () => {
 describe("the plan schema stays inside the API's constraints", () => {
   const source = readFileSync(resolve(process.cwd(), "lib/agents/plan.ts"), "utf8");
 
-  it("does not constrain minItems", () => {
-    // The key, not the word — the comment above the schema explains why it is
-    // absent and would otherwise match.
-    expect(source).not.toMatch(/minItems\s*:/);
+  it.each(["minItems", "maxItems"])(
+    "does not constrain %s on the steps array",
+    (key) => {
+      /*
+       * Both are rejected, and the API reports one rule at a time — removing
+       * minItems alone produced a second 400 naming maxItems. The keys, not
+       * the words: the comment above the schema explains why they are absent
+       * and would otherwise match.
+       */
+      expect(source).not.toMatch(new RegExp(`${key}\\s*:`));
+    }
+  );
+
+  it("still enforces the step ceiling in code", () => {
+    expect(source).toMatch(/steps\.length >= MAX_STEPS/);
   });
 
   it("still enforces the step floor after the call", () => {

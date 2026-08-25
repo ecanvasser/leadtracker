@@ -66,17 +66,16 @@ const PLAN_SCHEMA = {
     steps: {
       type: "array",
       /*
-       * No `minItems`.
+       * No `minItems` and no `maxItems`.
        *
-       * The structured-output schema only accepts 0 or 1 there — anything else
-       * is rejected with a 400 before the request runs. The floor is stated in
-       * the description instead and enforced after the call, where buildPlan
-       * throws if fewer than MIN_STEPS survive normalisation. `maxItems` is
-       * accepted and kept, since a ceiling the decoder can enforce saves
-       * tokens that normalizePlan would otherwise truncate.
+       * Structured-output schemas support neither on arrays — `minItems` only
+       * as 0 or 1, `maxItems` not at all — and each is rejected with a 400
+       * before the request runs. Both bounds are stated in the description and
+       * enforced after the call: normalizePlan caps at MAX_STEPS and buildPlan
+       * throws if fewer than MIN_STEPS survive. That was always where they
+       * were really enforced; the schema copy added nothing but a failure mode.
        */
-      maxItems: MAX_STEPS,
-      description: `Between ${MIN_STEPS} and ${MAX_STEPS} touches, in order.`,
+      description: `Between ${MIN_STEPS} and ${MAX_STEPS} touches, in order. Do not exceed ${MAX_STEPS}.`,
       items: {
         type: "object",
         properties: {
