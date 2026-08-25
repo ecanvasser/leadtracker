@@ -33,6 +33,18 @@ export interface ScanInput {
   scannedThrough: string | null;
   brokerTimezone: string;
   phone: string | null;
+  /**
+   * Called with what each model call cost. Optional so the pattern-only paths
+   * and the tests stay unchanged; the worker passes it, because a call this
+   * function makes is spend the budget has to see.
+   */
+  onUsage?: (usage: {
+    model: string;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens?: number;
+    latency_ms: number;
+  }) => void;
 }
 
 export interface ScanResult {
@@ -90,7 +102,10 @@ export async function scanForCallCommitments(
       messageDay,
       zone.timeZone
     );
-    if (!result.resolvedLocally) modelCalls++;
+    if (!result.resolvedLocally) {
+      modelCalls++;
+      if (result.usage) input.onUsage?.(result.usage);
+    }
 
     if (result.candidate) {
       const scheduledAt = candidateToInstant(result.candidate, zone.timeZone);

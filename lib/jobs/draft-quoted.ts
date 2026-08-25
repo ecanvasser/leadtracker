@@ -34,6 +34,7 @@ import type { LeadState } from "@/lib/insights/lead-state";
 // imports the handler below.
 import type { JobHandler } from "@/lib/jobs/handlers";
 import { localDate } from "@/lib/time";
+import { recordModelUsage, withinBudget } from "@/lib/ai/usage";
 import type { AllStages } from "@/types/db";
 
 /** Marks the queue rows this job creates, so it can find its own work. */
@@ -293,6 +294,17 @@ export const draftQuoted: JobHandler = async (supabase, job) => {
     return { summary: "no loan file; refusing to draft from nothing", usedModel: false };
   }
 
+  /*
+   * Cost rule C6. Drafting is the one path in Phase 8 that spends money, so it
+   * is the first thing that should stop when the day's budget is gone.
+   * Checked after the fresh read so the cache still gets corrected, and before
+   * the model so nothing is charged.
+   */
+  const budget = await withinBudget(supabase, contact.user_id);
+  if (!budget.ok) {
+    return { summary: "over daily token budget; no draft", usedModel: false };
+  }
+
   const hoursSincePitch = contact.stage_changed_at
     ? (Date.now() - new Date(contact.stage_changed_at).getTime()) / 3_600_000
     : null;
@@ -307,6 +319,20 @@ export const draftQuoted: JobHandler = async (supabase, job) => {
     leadState: (cache?.lead_state as LeadState | null) ?? null,
     hoursSincePitch,
   });
+
+  /*
+   * One ledger row per attempt, not per draft. draftOne retries once on a
+   * validation failure, and both calls were charged — a budget that counted
+   * only the surviving draft would understate the cost of exactly the leads
+   * that are hardest to write for.
+   */
+  for (const usage of result.usage) {
+    await recordModelUsage(
+      supabase,
+      { userId: contact.user_id, purpose: "draft_quoted", contactId },
+      usage
+    );
+  }
 
   // Recorded whether or not it validated: the caps count attempts, not
   // successes, and a draft that failed twice still cost two calls.

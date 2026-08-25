@@ -120,8 +120,21 @@ Status: ${prospect.status || "N/A"}`;
 export async function analyzeProspect(
   prospect: BonzoProspect,
   communications: BonzoCommunication[],
-  notes: BonzoNote[]
+  notes: BonzoNote[],
+  /**
+   * Called with what the request cost. Optional so the pure paths and tests
+   * stay unchanged; the worker always passes it, because usage this function
+   * used to drop is most of the spend the budget is supposed to govern.
+   */
+  onUsage?: (usage: {
+    model: string;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens: number;
+    latency_ms: number;
+  }) => void
 ): Promise<AiAnalysis> {
+  const startedAt = Date.now();
   const client = new Anthropic();
 
   const response = await client.messages.create({
@@ -153,5 +166,13 @@ export async function analyzeProspect(
   // Drafting is not this module's job. The caller fills draft_messages from
   // lib/ai/draft.ts so the contact page and the queue produce the same text
   // under the same constraints.
+  onUsage?.({
+    model: response.model,
+    input_tokens: response.usage.input_tokens ?? 0,
+    output_tokens: response.usage.output_tokens ?? 0,
+    cache_read_input_tokens: response.usage.cache_read_input_tokens ?? 0,
+    latency_ms: Date.now() - startedAt,
+  });
+
   return { ...parsed, draft_messages: [] };
 }

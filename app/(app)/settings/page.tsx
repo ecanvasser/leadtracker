@@ -13,7 +13,12 @@ import {
 } from "@/components/settings/drafting-settings";
 import { resolveCadenceConfig } from "@/lib/cadence/config";
 import { modelFor } from "@/lib/ai/models";
-import { localDateFor } from "@/lib/time";
+import {
+  localDateFor,
+  startOfLocalDayUtc,
+  endOfLocalDayUtc,
+  getUserTimezone,
+} from "@/lib/time";
 
 export const instant = false;
 
@@ -28,29 +33,38 @@ export default async function SettingsPage() {
   const userId = authData.claims.sub as string;
   const service = createServiceClient();
   const today = await localDateFor(userId);
+  // Needed before the settings row is fetched below, because the ledger query
+  // is bounded by the broker's local day rather than UTC.
+  const timeZone = await getUserTimezone(userId);
 
-  const [{ data: link }, { data: settings }, { data: traces }] = await Promise.all([
+  const [{ data: link }, { data: settings }, { data: usageRows }] = await Promise.all([
     supabase.from("telegram_links").select("*").eq("user_id", userId).maybeSingle(),
     service.from("user_settings").select("*").eq("user_id", userId).maybeSingle(),
-    // C6 — spend is recorded per queue item rather than as a monthly total, so
-    // it can be attributed to the part of the system that spent it.
+    /*
+     * C6 — read from the model_usage ledger.
+     *
+     * This used to sum decision_trace on the day's queue rows, which only ever
+     * covered queue generation: classification, prospect analysis, call
+     * extraction and drafting all returned their usage to a caller that
+     * dropped it. The number shown here was a fraction of the real spend, and
+     * confidently so.
+     */
     service
-      .from("daily_queue")
-      .select("decision_trace")
+      .from("model_usage")
+      .select("input_tokens, output_tokens, cache_read_input_tokens")
       .eq("user_id", userId)
-      .eq("queue_date", today)
-      .not("decision_trace", "is", null),
+      .gte("created_at", startOfLocalDayUtc(today, timeZone).toISOString())
+      .lt("created_at", endOfLocalDayUtc(today, timeZone).toISOString()),
   ]);
 
   let inputTokens = 0;
   let outputTokens = 0;
   let calls = 0;
-  for (const row of traces ?? []) {
-    const usage = (row.decision_trace as { usage?: Record<string, number> } | null)
-      ?.usage;
-    if (!usage) continue;
-    inputTokens += usage.input_tokens ?? 0;
-    outputTokens += usage.output_tokens ?? 0;
+  for (const row of usageRows ?? []) {
+    // Cache reads count towards the budget, so they count here too — the two
+    // numbers have to describe the same thing.
+    inputTokens += (row.input_tokens ?? 0) + (row.cache_read_input_tokens ?? 0);
+    outputTokens += row.output_tokens ?? 0;
     calls += 1;
   }
 

@@ -31,6 +31,7 @@ import {
 } from "@/lib/insights/lead-state";
 import { getUserTimezone, localDate, leadAgeDays } from "@/lib/time";
 import { enqueueJob } from "@/lib/jobs/queue";
+import { recordModelUsage, withinBudget } from "@/lib/ai/usage";
 import { scanForCallCommitments, recordProposedCall } from "@/lib/calls/scan";
 
 export interface HandlerResult {
@@ -254,9 +255,26 @@ export const refreshCache: JobHandler = async (supabase, job) => {
   }
 
   // Both model calls sit behind the needsModelWork branch above. A refresh
-  // that finds
-  // nothing new has already returned without reaching either.
+  // that finds nothing new has already returned without reaching either.
   const timeZone = await getUserTimezone(contact.user_id, supabase);
+
+  /*
+   * Cost rule C6, enforced rather than merely configured.
+   *
+   * The watermarks and the cached history are already written above, so
+   * stopping here still leaves the refresh useful: Today stays accurate, the
+   * silence clocks keep running, and only the model's opinion is missing.
+   * That is the right thing to drop first when the day's budget is spent.
+   */
+  const budget = await withinBudget(supabase, contact.user_id);
+  if (!budget.ok) {
+    return {
+      summary:
+        `refreshed with ${messages.length} messages; over daily token budget, ` +
+        `no classification`,
+      usedModel: false,
+    };
+  }
 
   /*
    * Spec 3.3. Refreshing Bonzo is free; thinking about it is not. The lead is
@@ -265,7 +283,13 @@ export const refreshCache: JobHandler = async (supabase, job) => {
    * said something, which is the only event that changes what they think.
    */
   const [aiAnalysis, classification] = await Promise.all([
-    analyzeProspect(resolved, communications, notes),
+    analyzeProspect(resolved, communications, notes, (usage) => {
+      void recordModelUsage(
+        supabase,
+        { userId: contact.user_id, purpose: "analyze", contactId },
+        usage
+      );
+    }),
     !due.classify
       ? Promise.resolve(null)
       : classifyLeadState({
@@ -277,7 +301,16 @@ export const refreshCache: JobHandler = async (supabase, job) => {
       // When the lead entered Quoted – Follow Up. Drives days_since_pitch,
       // which is computed rather than asked of the model.
       quotedAt: contact.stage_changed_at ?? null,
-        }).catch((e) => {
+        })
+        .then(async (r) => {
+          await recordModelUsage(
+            supabase,
+            { userId: contact.user_id, purpose: "classify", contactId },
+            r.usage
+          );
+          return r;
+        })
+        .catch((e) => {
       // Classification is valuable but not worth failing the whole refresh
       // for — the cached history and analysis are still an improvement.
           console.error(
@@ -349,6 +382,13 @@ export const refreshCache: JobHandler = async (supabase, job) => {
       scannedThrough: cache?.calls_scanned_through ?? null,
       brokerTimezone: timeZone,
       phone: prospectPhone ?? contact.phone ?? null,
+      onUsage: (usage) => {
+        void recordModelUsage(
+          supabase,
+          { userId: contact.user_id, purpose: "extract_call_time", contactId },
+          { cache_read_input_tokens: 0, ...usage }
+        );
+      },
     });
 
     if (scan.proposed) {
