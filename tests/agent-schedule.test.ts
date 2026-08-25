@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { touchDue, scheduleTouches } from "@/lib/agents/schedule";
 import { normalizePlan, MIN_STEPS, MAX_STEPS } from "@/lib/agents/plan";
 import type { AgentPlan } from "@/lib/agents/types";
@@ -168,5 +170,29 @@ describe("normalizePlan", () => {
     const out = normalizePlan({ summary: "s", steps: many } as AgentPlan, 30);
     expect(out.steps.length).toBeLessThanOrEqual(MAX_STEPS);
     expect(MAX_STEPS).toBeGreaterThan(MIN_STEPS);
+  });
+});
+
+/*
+ * The plan schema has to be one the API will actually accept.
+ *
+ * Structured-output schemas reject `minItems` values other than 0 or 1, with a
+ * 400 raised before the request runs — so the first real deploy failed on a
+ * schema that had never been exercised. The step floor lives in code instead,
+ * which is where it was always enforced anyway.
+ */
+describe("the plan schema stays inside the API's constraints", () => {
+  const source = readFileSync(resolve(process.cwd(), "lib/agents/plan.ts"), "utf8");
+
+  it("does not constrain minItems", () => {
+    // The key, not the word — the comment above the schema explains why it is
+    // absent and would otherwise match.
+    expect(source).not.toMatch(/minItems\s*:/);
+  });
+
+  it("still enforces the step floor after the call", () => {
+    // buildPlan throws when fewer than MIN_STEPS survive normalisation, so
+    // dropping the schema constraint loses nothing.
+    expect(source).toMatch(/plan\.steps\.length < MIN_STEPS/);
   });
 });

@@ -65,8 +65,18 @@ const PLAN_SCHEMA = {
     },
     steps: {
       type: "array",
-      minItems: MIN_STEPS,
+      /*
+       * No `minItems`.
+       *
+       * The structured-output schema only accepts 0 or 1 there — anything else
+       * is rejected with a 400 before the request runs. The floor is stated in
+       * the description instead and enforced after the call, where buildPlan
+       * throws if fewer than MIN_STEPS survive normalisation. `maxItems` is
+       * accepted and kept, since a ceiling the decoder can enforce saves
+       * tokens that normalizePlan would otherwise truncate.
+       */
       maxItems: MAX_STEPS,
+      description: `Between ${MIN_STEPS} and ${MAX_STEPS} touches, in order.`,
       items: {
         type: "object",
         properties: {
