@@ -31,6 +31,8 @@ export const JOB_TYPES = [
    * evaluation" and declines. No Bonzo call, no model call, no cost.
    */
   "evaluate_workflows",
+  // Phase 8, contact agents. Drafts one step of a deployed plan.
+  "agent_touch",
 ] as const;
 
 export type JobType = (typeof JOB_TYPES)[number];

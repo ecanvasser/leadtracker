@@ -89,6 +89,20 @@ export interface DraftOneInput {
   leadState: LeadState | null;
   /** Hours since the quote went out, for the prompt's sense of timing. */
   hoursSincePitch: number | null;
+  /**
+   * Set when this draft is one step of a deployed agent's plan.
+   *
+   * Carries Eddie's own brief about the lead and the step's angle. Both
+   * outrank the classifier's read, which is inferred from a transcript, while
+   * the brief was typed by a person who has spoken to them.
+   */
+  agent?: {
+    brief: string;
+    angle: string;
+    hypothesis: string;
+    stepNumber: number;
+    totalSteps: number;
+  };
   /** An instruction from Eddie, on the redraft path only. */
   instruction?: string;
   /** The draft being revised, on the redraft path only. */
@@ -222,6 +236,31 @@ function buildUserMessage(input: DraftOneInput): string {
     .filter((l) => l.split(": ").slice(1).join(": ").length > 0)
     .join("\n");
   if (thread) parts.push(`CONVERSATION SO FAR:\n${thread}`);
+
+  if (input.agent) {
+    /*
+     * Placed last among the context blocks and before the style exemplars, so
+     * it is the freshest thing in the prompt. The brief is the reason this
+     * draft is allowed to exist outside the quoted window at all — see
+     * lib/agents/types.ts — and it must not read as one more note among many.
+     */
+    parts.push(
+      `THIS IS TOUCH ${input.agent.stepNumber} OF ${input.agent.totalSteps} IN A PLAN HE APPROVED.
+` +
+        `What this touch is about: ${input.agent.angle}
+` +
+        `What it assumes is holding them back: ${input.agent.hypothesis}
+
+` +
+        `HIS OWN BRIEF ON THIS LEAD — he wrote this himself, and it outranks ` +
+        `anything inferred from the transcript:
+${input.agent.brief.trim()}
+
+` +
+        `Write the touch described above. Do not write a general follow-up, and ` +
+        `do not repeat an angle an earlier touch already used.`
+    );
+  }
 
   const exemplars = styleExemplars(input.communications);
   if (exemplars.length > 0) {

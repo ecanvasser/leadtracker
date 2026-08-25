@@ -13,6 +13,8 @@ interface SortableContactCardProps {
   onClick: () => void;
   onEnroll?: (contactId: string) => void;
   onMarkAdverse?: (contact: Contact) => void;
+  onDeployAgent?: (contact: Contact) => void;
+  hasAgent?: boolean;
   stageOptions?: readonly PipelineStage[];
   onChangeStage?: (contact: Contact, stage: PipelineStage) => void;
 }
@@ -24,6 +26,8 @@ export function SortableContactCard({
   onClick,
   onEnroll,
   onMarkAdverse,
+  onDeployAgent,
+  hasAgent,
   stageOptions,
   onChangeStage,
 }: SortableContactCardProps) {
@@ -51,6 +55,8 @@ export function SortableContactCard({
         onClick={onClick}
         onEnroll={onEnroll}
         onMarkAdverse={onMarkAdverse}
+        onDeployAgent={onDeployAgent}
+        hasAgent={hasAgent}
         stageOptions={stageOptions}
         onChangeStage={onChangeStage}
       />

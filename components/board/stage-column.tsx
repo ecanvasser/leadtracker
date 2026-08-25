@@ -20,6 +20,9 @@ interface StageColumnProps {
   onEnroll?: (contactId: string) => void;
   /** Opens the adverse reason picker for a card. */
   onMarkAdverse?: (contact: Contact) => void;
+  onDeployAgent?: (contact: Contact) => void;
+  /** Contact ids with a live agent, so each card can show it. */
+  agentContactIds?: Set<string>;
   /** Sets a card's specific stage from its badge, in a merged column. */
   onChangeStage?: (contact: Contact, stage: PipelineStage) => void;
 }
@@ -42,6 +45,8 @@ export function StageColumn({
   onContactClick,
   onEnroll,
   onMarkAdverse,
+  onDeployAgent,
+  agentContactIds,
   onChangeStage,
 }: StageColumnProps) {
   const { setNodeRef, isOver } = useDroppable({ id: column.id });
@@ -84,6 +89,8 @@ export function StageColumn({
                 onClick={() => onContactClick(contact.id)}
                 onEnroll={onEnroll}
                 onMarkAdverse={onMarkAdverse}
+                onDeployAgent={onDeployAgent}
+                hasAgent={agentContactIds?.has(contact.id)}
                 stageOptions={merged ? column.stages : undefined}
                 onChangeStage={onChangeStage}
               />

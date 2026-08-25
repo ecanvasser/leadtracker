@@ -18,7 +18,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ListTodo, EyeOff, Plus, Ban } from "lucide-react";
+import { ListTodo, EyeOff, Plus, Ban, Bot } from "lucide-react";
 import type { BoardMeta } from "@/app/(app)/board/page";
 
 interface ContactCardProps {
@@ -29,6 +29,10 @@ interface ContactCardProps {
   onEnroll?: (contactId: string) => void;
   /** Opens the adverse reason picker. Omitted on the drag overlay. */
   onMarkAdverse?: (contact: Contact) => void;
+  /** Opens the deploy-agent dialog for this lead. */
+  onDeployAgent?: (contact: Contact) => void;
+  /** True when this lead already has a live agent, so the card can say so. */
+  hasAgent?: boolean;
   /**
    * The stages this card's column can hold, when there is more than one.
    * Present only for the merged In Process column (D2), where the specific
@@ -60,6 +64,8 @@ export function ContactCard({
   onClick,
   onEnroll,
   onMarkAdverse,
+  onDeployAgent,
+  hasAgent,
   stageOptions,
   onChangeStage,
   isDragging,
@@ -124,6 +130,37 @@ export function ContactCard({
       <div className="flex items-start justify-between gap-2 mb-1.5">
         <p className="text-sm font-medium leading-tight">{contact.name}</p>
         <div className="flex items-center gap-1 shrink-0 mt-0.5">
+          {/*
+            Deploying an agent is a deliberate act on one lead, so it belongs
+            where Eddie is already looking at that lead. Same reveal-on-hover
+            treatment as the adverse control: present, not shouting.
+          */}
+          {!!onDeployAgent && !isDragging && !hasAgent && (
+            <button
+              type="button"
+              aria-label={`Deploy an agent for ${contact.name}`}
+              title="Deploy agent"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                cancelPress();
+                setRevealed(false);
+                onDeployAgent?.(contact);
+              }}
+              className={`rounded p-0.5 text-muted-foreground hover:text-foreground hover:bg-accent transition-opacity focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+                revealed ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+              }`}
+            >
+              <Bot className="h-3 w-3" />
+            </button>
+          )}
+          {/* An agent already running is a fact about the card, not an action.
+              Shown always rather than on hover. */}
+          {hasAgent && (
+            <span title="An agent is following up on this lead">
+              <Bot className="h-3 w-3 text-emerald-500" />
+            </span>
+          )}
           {canMarkAdverse && (
             <button
               type="button"

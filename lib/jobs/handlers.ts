@@ -8,7 +8,12 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { TERMINAL_STAGES, isQueueEligible, type Contact } from "@/types/db";
+import {
+  TERMINAL_STAGES,
+  isQueueEligible,
+  type AllStages,
+  type Contact,
+} from "@/types/db";
 import {
   getCommunicationHistory,
   getProspectNotes,
@@ -32,6 +37,8 @@ import {
 import { getUserTimezone, localDate, leadAgeDays } from "@/lib/time";
 import { enqueueJob } from "@/lib/jobs/queue";
 import { recordModelUsage, withinBudget } from "@/lib/ai/usage";
+import { agentTouch } from "@/lib/jobs/agent-touch";
+import { handleAgentStageChange, pauseAgentOnReply } from "@/lib/agents/lifecycle";
 import { scanForCallCommitments, recordProposedCall } from "@/lib/calls/scan";
 
 export interface HandlerResult {
@@ -419,6 +426,18 @@ export const refreshCache: JobHandler = async (supabase, job) => {
   // Follow-on work, enqueued rather than done inline so this handler stays
   // short and the reply path is retried on its own if drafting fails.
   if (hasNewInbound) {
+    /*
+     * A reply stops the agent before anything else happens with it. Eddie
+     * deployed the sequence to get exactly this, and a planned touch landing
+     * on top of a live conversation is the failure the whole feature has to
+     * avoid. Paused rather than retired — see lib/agents/lifecycle.ts.
+     */
+    try {
+      await pauseAgentOnReply(supabase, contactId);
+    } catch (e) {
+      console.error(`[jobs/refresh_cache] agent pause failed for ${contactId}:`, e);
+    }
+
     await enqueueJob(supabase, {
       userId: contact.user_id,
       contactId: contactId,
@@ -632,6 +651,23 @@ export const evaluateWorkflowsJob: JobHandler = async (supabase, job) => {
     .limit(1)
     .maybeSingle();
 
+  /*
+   * An agent is about the situation the lead was in when Eddie deployed it. A
+   * stage change is that situation changing, so it ends the agent before any
+   * rule is considered — this is a fact about the lead, not a rule matching.
+   *
+   * Runs even on a first arrival, which the guard below returns early for.
+   */
+  try {
+    await handleAgentStageChange(
+      supabase,
+      contactId,
+      transition?.to_stage as AllStages
+    );
+  } catch (e) {
+    console.error(`[jobs/evaluate_workflows] agent stage handling failed:`, e);
+  }
+
   if (!transition?.from_stage) {
     // A lead's first arrival logs a transition with no from_stage. Nothing
     // stage-based can match that, and the seed tests assert it must not.
@@ -735,6 +771,7 @@ export const handlers: Partial<Record<Job["job_type"], JobHandler>> = {
   draft_quoted: draftQuoted,
   refresh_cache: refreshCache,
   evaluate_workflows: evaluateWorkflowsJob,
+  agent_touch: agentTouch,
   draft_reply: draftReply,
   morning_digest: morningDigest,
 };

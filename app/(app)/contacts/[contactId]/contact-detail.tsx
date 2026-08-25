@@ -34,6 +34,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
 import { ArrowLeft, Plus, Trash2, Phone, Mail, MessageSquare, SkipForward, Send } from "lucide-react";
 import { InsightsPanel } from "./insights-panel";
+import { AgentPanel } from "@/components/agents/agent-panel";
 import { useRouter } from "next/navigation";
 
 interface ContactDetailProps {
@@ -570,7 +571,11 @@ export function ContactDetail({
         </div>
 
         {/* Right column — insights */}
-        <div className="lg:w-[65%] overflow-y-auto">
+        <div className="lg:w-[65%] overflow-y-auto space-y-4">
+          {/* Above the insights: an agent is the thing on this page that will
+              act on its own, so it should not be found by scrolling past a
+              read-only panel. */}
+          <AgentPanel contactId={contact.id} contactName={contact.name} />
           <InsightsPanel
             contact={contact}
             existingTasks={tasks}

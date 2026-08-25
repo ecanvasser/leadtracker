@@ -9,6 +9,7 @@ import {
   getUserTimezone,
 } from "@/lib/time";
 import { sendQueueItem, SendRefusedError } from "@/lib/outreach/send";
+import { settleTouchForQueueItem } from "@/lib/agents/lifecycle";
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
@@ -70,6 +71,13 @@ export async function POST(request: NextRequest) {
           ? { overrideSubject: editedSubject }
           : {}),
       });
+
+      // Send returns before the shared settle block below, so an agent card
+      // approved from the queue page has to close its touch here too.
+      await settleTouchForQueueItem(serviceClient, queueItemId, "sent").catch(
+        (e: unknown) =>
+          console.error("[daily-queue/action] agent touch settle failed:", e)
+      );
 
       const todayStr = await localDateFor(userId);
       const { data: nextItem } = await serviceClient
@@ -203,6 +211,16 @@ export async function POST(request: NextRequest) {
       completed_at: new Date().toISOString(),
     })
     .eq("id", queueItemId);
+
+  // A card from an agent closes its touch, whichever way it went. Without
+  // this the agent waits forever on a step Eddie has already dealt with.
+  await settleTouchForQueueItem(
+    serviceClient,
+    queueItemId,
+    action === "skip" ? "skipped" : "sent"
+  ).catch((e: unknown) =>
+    console.error("[daily-queue/action] agent touch settle failed:", e)
+  );
 
   await serviceClient.from("outreach_log").insert({
     user_id: userId,

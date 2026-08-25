@@ -179,6 +179,61 @@ export async function sweepDraftJobs(
 }
 
 /**
+ * Enqueues a job for every agent touch that has come due.
+ *
+ * Gated on working hours, unlike the drafting sweep, because an agent touch is
+ * scheduled days ahead and would otherwise fire at whatever hour the plan's
+ * arithmetic landed on. A card at 4am is a card Eddie reads at 8am with less
+ * trust in the thing that sent it.
+ *
+ * Whether a touch may actually fire is decided in the job, by touchDue, on
+ * freshly read Bonzo data. This only finds candidates.
+ */
+export async function sweepAgentTouches(
+  supabase: SupabaseClient,
+  userId: string,
+  now: Date = new Date()
+): Promise<{ enqueued: number; reason?: string }> {
+  const windows = await getNotificationWindows(userId, supabase);
+  const working = isWithinLocalWindow(
+    windows.workStart,
+    windows.workEnd,
+    now,
+    windows.timeZone
+  );
+  if (!working) return { enqueued: 0, reason: "outside working hours" };
+
+  /*
+   * Only touches whose agent is active. Filtering here rather than in the job
+   * keeps a paused agent from enqueueing a job every five minutes just to have
+   * it decline — the tick would still be correct, but the jobs table would
+   * fill with noise that looks like work.
+   */
+  const { data: touches } = await supabase
+    .from("contact_agent_touches")
+    .select("id, contact_id, contact_agents!inner(status)")
+    .eq("user_id", userId)
+    .eq("status", "pending")
+    .eq("contact_agents.status", "active")
+    .lte("due_at", now.toISOString())
+    .order("due_at", { ascending: true })
+    .limit(20);
+
+  let enqueued = 0;
+  for (const t of touches ?? []) {
+    const created = await enqueueJob(supabase, {
+      userId,
+      contactId: t.contact_id as string,
+      jobType: "agent_touch",
+      payload: { touch_id: t.id as string },
+    });
+    if (created) enqueued++;
+  }
+
+  return { enqueued };
+}
+
+/**
  * Enqueues the morning digest once the local clock has passed the configured
  * time and today's digest has not gone out.
  *
@@ -244,6 +299,12 @@ export async function sweepAllUsers(
         await sweepDraftJobs(supabase, u.user_id);
       } catch (e) {
         console.error(`[jobs/enqueue] draft sweep failed for ${u.user_id}:`, e);
+      }
+      // Agents ride the same tick and fail independently, for the same reason.
+      try {
+        await sweepAgentTouches(supabase, u.user_id, now);
+      } catch (e) {
+        console.error(`[jobs/enqueue] agent sweep failed for ${u.user_id}:`, e);
       }
     } catch (e) {
       console.error(`[jobs/enqueue] sweep failed for ${u.user_id}:`, e);

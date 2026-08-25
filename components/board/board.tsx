@@ -30,6 +30,7 @@ import { StageColumn } from "./stage-column";
 import { TodoColumn } from "./todo-column";
 import { ContactCard } from "./contact-card";
 import { ContactDialog } from "@/components/contact/contact-dialog";
+import { DeployAgentDialog } from "@/components/agents/deploy-agent-dialog";
 import Link from "next/link";
 import { toast } from "sonner";
 import { useRouter } from "next/navigation";
@@ -86,6 +87,8 @@ export function Board({
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<BoardFilter>("all");
   const [adverseFor, setAdverseFor] = useState<Contact | null>(null);
+  const [deployAgentFor, setDeployAgentFor] = useState<Contact | null>(null);
+  const [agentContactIds, setAgentContactIds] = useState<Set<string>>(new Set());
   const supabase = createClient();
   const router = useRouter();
 
@@ -306,6 +309,24 @@ export function Board({
 
     toast.success(`${contact.name} → ${STAGE_LABELS[stage]}`);
   }
+
+  /*
+   * Which leads already have a running agent.
+   *
+   * One query for the board rather than one per card: the badge is on every
+   * card, and a fetch per card would be forty requests on first paint.
+   */
+  const loadAgents = useCallback(async () => {
+    const { data } = await supabase
+      .from("contact_agents")
+      .select("contact_id")
+      .in("status", ["draft", "active", "paused"]);
+    setAgentContactIds(new Set((data ?? []).map((r) => r.contact_id as string)));
+  }, [supabase]);
+
+  useEffect(() => {
+    loadAgents();
+  }, [loadAgents]);
 
   function handleDragStart(event: DragStartEvent) {
     const contact = contacts.find((c) => c.id === event.active.id);
@@ -570,6 +591,8 @@ export function Board({
                 onContactClick={(id) => router.push(`/contacts/${id}`)}
                 onEnroll={handleEnroll}
                 onMarkAdverse={setAdverseFor}
+                onDeployAgent={setDeployAgentFor}
+                agentContactIds={agentContactIds}
                 onChangeStage={handleChangeStage}
               />
             ))}
@@ -604,6 +627,16 @@ export function Board({
           Marking a lead dead was the slowest interaction in the app: open the
           detail page, change a dropdown, pick a reason, click Save. It is now
           a drag and one click, and cancelling leaves the lead where it was. */}
+      {deployAgentFor && (
+        <DeployAgentDialog
+          contactId={deployAgentFor.id}
+          contactName={deployAgentFor.name}
+          open
+          onClose={() => setDeployAgentFor(null)}
+          onChanged={loadAgents}
+        />
+      )}
+
       {adverseFor && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
