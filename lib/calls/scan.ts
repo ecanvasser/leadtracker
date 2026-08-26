@@ -8,16 +8,15 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
-  detectCallCommitment,
   candidateToInstant,
-  looksLikeCommitment,
+  detectCallInThread,
   type CallCandidate,
 } from "@/lib/calls/detect";
 import {
   resolveProspectTimezone,
   type ResolvedTimezone,
 } from "@/lib/calls/timezone";
-import { getMortgageFields, isInbound } from "@/lib/bonzo/client";
+import { getMortgageFields } from "@/lib/bonzo/client";
 import { localDate } from "@/lib/time";
 
 export interface ScanInput {
@@ -103,59 +102,80 @@ export async function scanForCallCommitments(
     brokerTimezone: input.brokerTimezone,
   });
 
-  let modelCalls = 0;
-  let wantsCall: ScanResult["wantsCall"] = null;
+  /*
+   * One call over the whole thread, not one per message.
+   *
+   * The per-message detector asked "does this sentence contain a commitment?",
+   * which cannot see the shape a booking actually takes here:
+   *
+   *   BROKER: When is a good time to call?
+   *   LEAD:   5pm
+   *
+   * Neither message is a commitment on its own. Every refinement to the
+   * single-message gate — more phrases, wider patterns — made it either miss
+   * this or start firing on "I get paid on the 15th". Reading the exchange is
+   * the only thing that answers the question being asked.
+   *
+   * The whole thread goes rather than only the new messages: "5pm" means
+   * nothing without the question above it, and the question may be older than
+   * the watermark. The watermark still decides *whether* to spend anything at
+   * all, which is what the cost rule is about.
+   */
+  const detection = await detectCallInThread(
+    input.communications,
+    localDate(new Date(), zone.timeZone),
+    zone.timeZone
+  );
 
-  for (const message of fresh) {
-    // "Today" is evaluated relative to when the message was written, not now.
-    // A message from Monday saying "tomorrow" means Tuesday, even if it is
-    // read on Friday.
-    const messageDay = localDate(new Date(message.created_at), zone.timeZone);
+  if (detection.usage) input.onUsage?.(detection.usage);
+  const modelCalls = detection.usage ? 1 : 0;
 
-    const result = await detectCallCommitment(
-      message.content ?? "",
-      messageDay,
+  if (detection.call) {
+    const scheduledAt = candidateToInstant(
+      {
+        date: detection.call.date,
+        hour: detection.call.hour,
+        minute: detection.call.minute,
+        quote: detection.call.quote,
+        method: "model",
+      },
       zone.timeZone
     );
-    if (!result.resolvedLocally) {
-      modelCalls++;
-      if (result.usage) input.onUsage?.(result.usage);
-    }
 
-    if (result.candidate) {
-      const scheduledAt = candidateToInstant(result.candidate, zone.timeZone);
-
-      // A time already in the past is a stale reference, not a commitment.
-      if (scheduledAt.getTime() <= Date.now()) continue;
-
+    // A time already gone is a stale reference, not a booking.
+    if (scheduledAt.getTime() > Date.now()) {
       return {
-        proposed: { scheduledAt, zone, candidate: result.candidate },
+        proposed: {
+          scheduledAt,
+          zone,
+          candidate: {
+            date: detection.call.date,
+            hour: detection.call.hour,
+            minute: detection.call.minute,
+            quote: detection.call.quote,
+            method: "model",
+          },
+        },
         wantsCall: null,
         messagesScanned: fresh.length,
         modelCalls,
       };
     }
-
-    /*
-     * Commitment-shaped, inbound, and no time came out of it.
-     *
-     * `fresh` is newest-first, so the first one found is the most recent — and
-     * it is only kept if nothing later produced a real time, since the loop
-     * returns immediately on a hit.
-     */
-    if (
-      !wantsCall &&
-      isInbound(message.direction) &&
-      looksLikeCommitment(message.content ?? "")
-    ) {
-      wantsCall = {
-        quote: (message.content ?? "").trim().slice(0, 300),
-        at: message.created_at,
-      };
-    }
   }
 
-  return { proposed: null, wantsCall, messagesScanned: fresh.length, modelCalls };
+  return {
+    proposed: null,
+    wantsCall: detection.wantsCall
+      ? {
+          quote: detection.wantsCall.quote.slice(0, 300),
+          // Anchored to the newest message, since the request is a property of
+          // the conversation as a whole rather than of one line in it.
+          at: fresh[0]?.created_at ?? new Date().toISOString(),
+        }
+      : null,
+    messagesScanned: fresh.length,
+    modelCalls,
+  };
 }
 
 /**

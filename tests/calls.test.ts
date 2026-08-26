@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   stateFromAddress,
   areaCodeFromPhone,
@@ -8,10 +10,7 @@ import {
   formatInZone,
 } from "@/lib/calls/timezone";
 import {
-  looksLikeCommitment,
-  parseTimeOfDay,
-  resolveDayReference,
-  detectByPattern,
+
   candidateToInstant,
 } from "@/lib/calls/detect";
 
@@ -191,136 +190,10 @@ describe("instantForLocalTime across DST", () => {
   });
 });
 
-describe("looksLikeCommitment", () => {
-  const yes = [
-    "call me tomorrow at 2",
-    "let's talk Thursday at 10am",
-    "give me a call after 4",
-    "I'm free Friday morning",
-    "can you call me at 3?",
-    "that works for me",
-  ];
-  for (const t of yes) {
-    it(`treats "${t}" as a commitment`, () => expect(looksLikeCommitment(t)).toBe(true));
-  }
 
-  // A false positive costs a pointless confirmation prompt, and enough of
-  // those and the broker stops reading them.
-  const no = [
-    "I got denied on Thursday",
-    "we closed last Tuesday",
-    "my rate lock expires Friday",
-    "thanks for the info",
-    "what's the rate today?",
-  ];
-  for (const t of no) {
-    it(`does not treat "${t}" as a commitment`, () =>
-      expect(looksLikeCommitment(t)).toBe(false));
-  }
-});
 
-describe("parseTimeOfDay", () => {
-  it("reads an explicit pm", () => {
-    expect(parseTimeOfDay("at 2pm")).toMatchObject({ hour: 14, minute: 0, explicitMeridiem: true });
-  });
-
-  it("reads an explicit am", () => {
-    expect(parseTimeOfDay("at 10 a.m.")).toMatchObject({ hour: 10, explicitMeridiem: true });
-  });
-
-  it("reads minutes", () => {
-    expect(parseTimeOfDay("2:30pm")).toMatchObject({ hour: 14, minute: 30 });
-  });
-
-  it("reads 24-hour time", () => {
-    expect(parseTimeOfDay("at 14:00")).toMatchObject({ hour: 14, minute: 0 });
-  });
-
-  it("assumes afternoon for a bare 1-6, which is the business-hours reading", () => {
-    expect(parseTimeOfDay("at 2")).toMatchObject({ hour: 14, explicitMeridiem: false });
-    expect(parseTimeOfDay("at 4")).toMatchObject({ hour: 16 });
-  });
-
-  it("assumes morning for a bare 8-11", () => {
-    expect(parseTimeOfDay("at 9")).toMatchObject({ hour: 9 });
-  });
-
-  it("handles noon and midnight meridiems", () => {
-    expect(parseTimeOfDay("12pm")).toMatchObject({ hour: 12 });
-    expect(parseTimeOfDay("12am")).toMatchObject({ hour: 0 });
-  });
-
-  it("returns null when there is no time", () => {
-    expect(parseTimeOfDay("sometime next week")).toBeNull();
-  });
-
-  it("rejects an impossible time", () => {
-    expect(parseTimeOfDay("at 99:99")).toBeNull();
-  });
-});
-
-describe("resolveDayReference", () => {
-  // 2026-08-20 is a Thursday.
-  const today = "2026-08-20";
-
-  it("resolves today and tomorrow", () => {
-    expect(resolveDayReference("call me today", today, LA)).toBe("2026-08-20");
-    expect(resolveDayReference("call me tomorrow", today, LA)).toBe("2026-08-21");
-  });
-
-  it("resolves a named weekday forward", () => {
-    expect(resolveDayReference("let's talk Monday", today, LA)).toBe("2026-08-24");
-  });
-
-  it("treats the same weekday as next week, not today", () => {
-    // Said on a Thursday, "Thursday" means the next one — otherwise the
-    // reminder could point at an hour that has already passed.
-    expect(resolveDayReference("let's talk Thursday", today, LA)).toBe("2026-08-27");
-  });
-
-  it("pushes 'next X' a further week out", () => {
-    expect(resolveDayReference("next Monday works", today, LA)).toBe("2026-08-31");
-  });
-
-  it("accepts abbreviations", () => {
-    expect(resolveDayReference("call me Fri", today, LA)).toBe("2026-08-21");
-  });
-
-  it("returns null when no day is named", () => {
-    expect(resolveDayReference("call me at 2", today, LA)).toBeNull();
-  });
-});
 
 // C5: the cheap pass must handle the common shapes so the model is not called.
-describe("detectByPattern", () => {
-  const today = "2026-08-20";
-
-  it("resolves a plain commitment with no model call", () => {
-    const c = detectByPattern("call me tomorrow at 2pm", today, LA);
-    expect(c).toMatchObject({ date: "2026-08-21", hour: 14, method: "pattern" });
-  });
-
-  it("keeps the source quote", () => {
-    const c = detectByPattern("let's talk Monday at 10am", today, LA);
-    expect(c?.quote).toContain("Monday at 10am");
-  });
-
-  it("declines when a day is given but no time", () => {
-    expect(detectByPattern("let's talk Monday", today, LA)).toBeNull();
-  });
-
-  it("declines when a time is given but no day", () => {
-    expect(detectByPattern("call me at 2pm", today, LA)).toBeNull();
-  });
-
-  it("declines an ambiguous range, leaving it for the model", () => {
-    expect(detectByPattern("I'm free between 2 and 4 on Monday", today, LA)).toBeNull();
-  });
-
-  it("declines text that is not a commitment at all", () => {
-    expect(detectByPattern("I got denied Thursday at 2", today, LA)).toBeNull();
-  });
-});
 
 describe("candidateToInstant", () => {
   it("anchors the wall-clock time in the prospect's zone, not the broker's", () => {
@@ -338,5 +211,54 @@ describe("candidateToInstant", () => {
     // 2pm Chicago is two hours earlier in absolute terms than 2pm Pacific.
     expect(pacific.getTime() - chicago.getTime()).toBe(2 * 60 * 60 * 1000);
     expect(formatInZone(chicago, "America/Chicago")).toContain("2:00 PM");
+  });
+});
+
+/*
+ * Thread-level detection.
+ *
+ * The three shapes that decided the design, asserted against the shape of the
+ * contract rather than against a live model — the model itself was verified by
+ * hand on Gerald's real thread, which returned 5pm.
+ */
+describe("detectCallInThread contract", () => {
+  const source = readFileSync(
+    resolve(process.cwd(), "lib/calls/detect.ts"),
+    "utf8"
+  );
+
+  it("reads the whole exchange, not one message", () => {
+    /*
+     * The bug this replaced: "When is a good time to call?" / "5pm" has the
+     * intent in one message and the time in another, and no single-message
+     * gate can see it.
+     */
+    expect(source).toMatch(/When is a good time to call\?" followed by "5pm"/);
+    expect(source).toMatch(/Read the exchange, not the sentence/);
+  });
+
+  it("keeps the wants-call answer on the same call", () => {
+    // One model call answers both questions; two would be two chances to
+    // disagree about the same conversation.
+    expect(source).toMatch(/RETURN WANTS_CALL/);
+    expect(source).toMatch(/Only when the LEAD wants it/);
+  });
+
+  it("is told that finding nothing is the common case", () => {
+    // Without this the model reliably invents a call from any date-shaped
+    // token — "I get paid on the 15th" was the one that kept surfacing.
+    expect(source).toMatch(/RETURN NEITHER/);
+    expect(source).toMatch(/Do not manufacture one/);
+    expect(source).toMatch(/I get paid on the 15th/);
+  });
+
+  it("runs on the cheap tier", () => {
+    // Mechanical extraction, high volume, no judgement worth paying for.
+    expect(source).toMatch(/role: "extract"/);
+  });
+
+  it("no longer carries a single-message gate", () => {
+    expect(source).not.toMatch(/looksLikeCommitment/);
+    expect(source).not.toMatch(/COMMITMENT_PATTERNS/);
   });
 });

@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import { instantForLocalTime } from "@/lib/calls/timezone";
-import { looksLikeCommitment } from "@/lib/calls/detect";
 
 const LA = "America/Los_Angeles";
 
@@ -89,47 +88,3 @@ describe("every hour of the day resolves to the day that was asked for", () => {
   });
 });
 
-/*
- * "Wants to talk, no time set."
- *
- * The case that surfaced this: a lead wrote "Let's talk in the morning" and
- * "What time are you available?", nobody ever named an hour, and the scan
- * correctly found nothing — which was indistinguishable from a thread with no
- * call in it at all. The detector's gate fires on both messages; what was
- * missing was anywhere for that fact to go.
- */
-describe("commitment-shaped messages with no time in them", () => {
-  it("recognises the wording that started this", () => {
-    expect(looksLikeCommitment("Let's talk in the morning")).toBe(true);
-    expect(looksLikeCommitment("What time are you available?")).toBe(true);
-  });
-
-  it("recognises the other ways a lead asks", () => {
-    for (const m of [
-      "Call me when you get a chance",
-      "Can you call me sometime this week",
-      "I'm free whenever",
-      "Let's hop on a quick call",
-      "give me a call",
-    ]) {
-      expect(looksLikeCommitment(m)).toBe(true);
-    }
-  });
-
-  it("stays quiet on ordinary conversation", () => {
-    /*
-     * The gate has to stay narrow. A false positive costs a pointless prompt,
-     * and enough of those and Eddie stops reading them — which is worse than
-     * missing one, because it breaks the ones that are real.
-     */
-    for (const m of [
-      "I got denied on Thursday",
-      "Thanks, that makes sense",
-      "My credit score is 640",
-      "The appraisal came in low",
-      "Sounds good",
-    ]) {
-      expect(looksLikeCommitment(m)).toBe(false);
-    }
-  });
-});
