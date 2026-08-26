@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
 import { Phone, Check, X, Clock } from "lucide-react";
-import type { DayCall } from "@/lib/calls/book";
+import type { DayCall, WantsCall } from "@/lib/calls/book";
 
 /**
  * The day's calls, above everything else on Today.
@@ -22,14 +22,17 @@ import type { DayCall } from "@/lib/calls/book";
 export function CallsToday({
   initialCalls,
   initialOverdue,
+  initialWantsCall,
   timeZone,
 }: {
   initialCalls: DayCall[];
   initialOverdue: DayCall[];
+  initialWantsCall: WantsCall[];
   timeZone: string;
 }) {
   const [calls, setCalls] = useState(initialCalls);
   const [overdue, setOverdue] = useState(initialOverdue);
+  const [wants, setWants] = useState(initialWantsCall);
   const [busy, setBusy] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
@@ -38,6 +41,7 @@ export function CallsToday({
       const body = await res.json();
       setCalls(body.calls ?? []);
       setOverdue(body.overdue ?? []);
+      setWants(body.wantsCall ?? []);
     } catch {
       // The server-rendered list stands.
     }
@@ -46,7 +50,8 @@ export function CallsToday({
   useEffect(() => {
     setCalls(initialCalls);
     setOverdue(initialOverdue);
-  }, [initialCalls, initialOverdue]);
+    setWants(initialWantsCall);
+  }, [initialCalls, initialOverdue, initialWantsCall]);
 
   async function act(callId: string, action: string) {
     setBusy(callId);
@@ -64,7 +69,18 @@ export function CallsToday({
     await reload();
   }
 
-  if (calls.length === 0 && overdue.length === 0) return null;
+  async function dismissWants(contactId: string) {
+    setBusy(contactId);
+    await fetch("/api/calls/wants", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contactId }),
+    });
+    setBusy(null);
+    await reload();
+  }
+
+  if (calls.length === 0 && overdue.length === 0 && wants.length === 0) return null;
 
   return (
     <div className="mb-6 rounded-xl border border-border/60 p-4">
@@ -94,6 +110,62 @@ export function CallsToday({
             />
           ))}
         </ol>
+      )}
+
+      {wants.length > 0 && (
+        <div className="mt-4 border-t border-border/60 pt-3">
+          {/*
+            The gap the time-extracting detector cannot see. "Let's talk in the
+            morning — what time are you available?" has no time to extract, so
+            before this it produced silence, indistinguishable from a thread
+            with no call in it. It is the worst case to be quiet about: the
+            lead asked, and is waiting.
+          */}
+          <p className="mb-2 text-[11px] font-medium text-sky-400">
+            Asked to talk — no time set
+          </p>
+          <ol className="space-y-2">
+            {wants.map((w) => (
+              <li key={w.contact_id} className="flex items-start gap-3 text-sm">
+                <span className="w-16 shrink-0 pt-0.5 text-xs text-muted-foreground">
+                  {new Intl.DateTimeFormat("en-US", {
+                    timeZone,
+                    month: "short",
+                    day: "numeric",
+                  }).format(new Date(w.asked_at))}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <Link
+                    href={`/contacts/${w.contact_id}`}
+                    className="font-medium hover:underline"
+                  >
+                    {w.contact_name}
+                  </Link>
+                  <p className="mt-0.5 text-xs italic text-muted-foreground">
+                    “{w.quote}”
+                  </p>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  <Link
+                    href={`/contacts/${w.contact_id}`}
+                    className="rounded border border-border/60 px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:border-border hover:text-foreground"
+                  >
+                    Book
+                  </Link>
+                  <button
+                    type="button"
+                    disabled={busy === w.contact_id}
+                    onClick={() => dismissWants(w.contact_id)}
+                    title="Dismiss"
+                    className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
       )}
 
       {overdue.length > 0 && (

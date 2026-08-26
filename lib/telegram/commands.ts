@@ -287,6 +287,19 @@ async function callbackFlow(ctx: Context, session: SessionData, clear: Clear) {
   // Today card taps. Same reasoning: its own prefixes, answered before the
   // contact-management flows below, which claim broad ones like "stage:".
   if (await handleTodayCallback(ctx)) return;
+
+  /*
+   * Dismissing a "wants to talk" card. Matched here, before the broad
+   * contact-management prefixes below, for the same reason the others are.
+   */
+  if (data.startsWith("wcd:")) {
+    const { handleWantsCallDismiss } = await import("@/lib/telegram/call-confirm");
+    await handleWantsCallDismiss(createServiceClient(), data.slice(4));
+    await ctx.answerCallbackQuery({ text: "Dismissed" });
+    await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+    return;
+  }
+
   await ctx.answerCallbackQuery();
 
   const supabase = createServiceClient();

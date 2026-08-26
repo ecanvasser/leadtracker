@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
-import { bookCall, callsForDay, overdueCalls } from "@/lib/calls/book";
+import { bookCall, callsForDay, overdueCalls, wantsCallLeads } from "@/lib/calls/book";
 import { getUserTimezone, localDate } from "@/lib/time";
 import { instantForLocalTime } from "@/lib/calls/timezone";
 
@@ -36,12 +36,13 @@ export async function GET(request: NextRequest) {
 
   const day = request.nextUrl.searchParams.get("day") ?? localDate(new Date(), timeZone);
 
-  const [calls, overdue] = await Promise.all([
+  const [calls, overdue, wantsCall] = await Promise.all([
     callsForDay(service, userId, timeZone, day),
     overdueCalls(service, userId),
+    wantsCallLeads(service, userId),
   ]);
 
-  return NextResponse.json({ day, timeZone, calls, overdue });
+  return NextResponse.json({ day, timeZone, calls, overdue, wantsCall });
 }
 
 /**

@@ -24,7 +24,7 @@ import { describeWait } from "@/lib/turn/format";
 import { bonzoProspectUrl } from "@/lib/turn/links";
 import type { TurnResult } from "@/lib/turn/types";
 import { CallsToday } from "@/components/calls/calls-today";
-import type { DayCall } from "@/lib/calls/book";
+import type { DayCall, WantsCall } from "@/lib/calls/book";
 import { formatSpeed, type SpeedToQuote } from "@/lib/turn/speed";
 import {
   LOAN_TYPE_LABELS,
@@ -40,6 +40,7 @@ interface TodayScreenProps {
   counts: { your_move: number; their_move: number; waiting: number; total: number };
   calls: DayCall[];
   overdueCalls: DayCall[];
+  wantsCall: WantsCall[];
   timeZone: string;
   overdueDays: number;
   speed: SpeedToQuote;
@@ -58,6 +59,7 @@ export function TodayScreen({
   counts,
   calls,
   overdueCalls,
+  wantsCall,
   timeZone,
   overdueDays,
   speed,
@@ -120,6 +122,7 @@ export function TodayScreen({
       <CallsToday
         initialCalls={calls}
         initialOverdue={overdueCalls}
+        initialWantsCall={wantsCall}
         timeZone={timeZone}
       />
 

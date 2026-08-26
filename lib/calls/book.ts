@@ -233,3 +233,70 @@ export async function overdueCalls(
     };
   });
 }
+
+export interface WantsCall {
+  contact_id: string;
+  contact_name: string;
+  loan_type: string;
+  asked_at: string;
+  quote: string;
+  bonzo_prospect_id: number | null;
+}
+
+/**
+ * Leads who asked to talk and never named a time.
+ *
+ * The gap the time-extracting detector cannot see. Excludes anyone with a call
+ * already on the books — they asked, it got booked, the request is answered —
+ * and anyone Eddie has dismissed, until they ask again.
+ */
+export async function wantsCallLeads(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<WantsCall[]> {
+  const { data } = await supabase
+    .from("insights_cache")
+    .select(
+      "contact_id, wants_call_at, wants_call_quote, contacts(name, loan_type, stage, bonzo_prospect_id)"
+    )
+    .eq("user_id", userId)
+    .not("wants_call_at", "is", null)
+    .is("wants_call_dismissed_at", null)
+    .order("wants_call_at", { ascending: false })
+    .limit(20);
+
+  const rows = (data ?? []).filter((r) => {
+    const c = r.contacts as unknown as { stage?: string } | null;
+    // A dead or funded lead is not waiting on a call.
+    return c?.stage !== "adverse" && c?.stage !== "funded";
+  });
+
+  if (rows.length === 0) return [];
+
+  // Anyone with a live call already has their answer.
+  const { data: booked } = await supabase
+    .from("scheduled_calls")
+    .select("contact_id")
+    .eq("user_id", userId)
+    .in("status", ["proposed", "confirmed"]);
+
+  const hasCall = new Set((booked ?? []).map((b) => b.contact_id as string));
+
+  return rows
+    .filter((r) => !hasCall.has(r.contact_id as string))
+    .map((r) => {
+      const c = r.contacts as unknown as {
+        name: string;
+        loan_type: string;
+        bonzo_prospect_id: number | null;
+      } | null;
+      return {
+        contact_id: r.contact_id as string,
+        contact_name: c?.name ?? "Unknown",
+        loan_type: c?.loan_type ?? "",
+        asked_at: r.wants_call_at as string,
+        quote: (r.wants_call_quote as string) ?? "",
+        bonzo_prospect_id: c?.bonzo_prospect_id ?? null,
+      };
+    });
+}

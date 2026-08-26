@@ -10,13 +10,14 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   detectCallCommitment,
   candidateToInstant,
+  looksLikeCommitment,
   type CallCandidate,
 } from "@/lib/calls/detect";
 import {
   resolveProspectTimezone,
   type ResolvedTimezone,
 } from "@/lib/calls/timezone";
-import { getMortgageFields } from "@/lib/bonzo/client";
+import { getMortgageFields, isInbound } from "@/lib/bonzo/client";
 import { localDate } from "@/lib/time";
 
 export interface ScanInput {
@@ -54,6 +55,19 @@ export interface ScanResult {
     zone: ResolvedTimezone;
     candidate: CallCandidate;
   } | null;
+  /**
+   * A lead who asked to talk without naming a time.
+   *
+   * "Let's talk in the morning. What time are you available?" is a request for
+   * a call with nothing to extract — the detector correctly finds no time, and
+   * before this the whole exchange produced silence, indistinguishable from a
+   * thread with no call in it at all. That is the case most likely to be
+   * forgotten, because the lead is actively waiting.
+   *
+   * Inbound only. Eddie writing "let's talk tomorrow" is him making a plan,
+   * not a lead asking him for one.
+   */
+  wantsCall: { quote: string; at: string } | null;
   messagesScanned: number;
   modelCalls: number;
 }
@@ -79,7 +93,7 @@ export async function scanForCallCommitments(
     );
 
   if (fresh.length === 0) {
-    return { proposed: null, messagesScanned: 0, modelCalls: 0 };
+    return { proposed: null, wantsCall: null, messagesScanned: 0, modelCalls: 0 };
   }
 
   const mf = getMortgageFields(input.prospect);
@@ -90,6 +104,7 @@ export async function scanForCallCommitments(
   });
 
   let modelCalls = 0;
+  let wantsCall: ScanResult["wantsCall"] = null;
 
   for (const message of fresh) {
     // "Today" is evaluated relative to when the message was written, not now.
@@ -115,13 +130,32 @@ export async function scanForCallCommitments(
 
       return {
         proposed: { scheduledAt, zone, candidate: result.candidate },
+        wantsCall: null,
         messagesScanned: fresh.length,
         modelCalls,
       };
     }
+
+    /*
+     * Commitment-shaped, inbound, and no time came out of it.
+     *
+     * `fresh` is newest-first, so the first one found is the most recent — and
+     * it is only kept if nothing later produced a real time, since the loop
+     * returns immediately on a hit.
+     */
+    if (
+      !wantsCall &&
+      isInbound(message.direction) &&
+      looksLikeCommitment(message.content ?? "")
+    ) {
+      wantsCall = {
+        quote: (message.content ?? "").trim().slice(0, 300),
+        at: message.created_at,
+      };
+    }
   }
 
-  return { proposed: null, messagesScanned: fresh.length, modelCalls };
+  return { proposed: null, wantsCall, messagesScanned: fresh.length, modelCalls };
 }
 
 /**

@@ -234,3 +234,68 @@ export function isCallCallback(data: string): boolean {
   const code = data.split(":")[0];
   return (Object.values(CALL_CB) as string[]).includes(code);
 }
+
+/**
+ * Tells Eddie a lead asked to talk without naming a time.
+ *
+ * There is nothing to confirm here — no time was proposed — so the card offers
+ * the two things he would actually do: open the thread and answer, or dismiss
+ * it. Booking happens on the contact page, where a date picker exists; a
+ * Telegram keyboard is a poor place to enter a time and an easy place to enter
+ * the wrong one.
+ */
+export async function pushWantsCall(
+  supabase: SupabaseClient,
+  userId: string,
+  contactId: string
+): Promise<boolean> {
+  const link = await getTelegramLink(supabase, userId);
+  if (!link) return false;
+
+  const [{ data: contact }, { data: cache }] = await Promise.all([
+    supabase
+      .from("contacts")
+      .select("name, loan_type, bonzo_prospect_id")
+      .eq("id", contactId)
+      .maybeSingle(),
+    supabase
+      .from("insights_cache")
+      .select("wants_call_quote, wants_call_at")
+      .eq("contact_id", contactId)
+      .maybeSingle(),
+  ]);
+
+  if (!contact || !cache?.wants_call_quote) return false;
+
+  const kb = new InlineKeyboard().text("Dismiss", `wcd:${contactId}`);
+  if (contact.bonzo_prospect_id) {
+    kb.url("Open in Bonzo", bonzoProspectUrl(contact.bonzo_prospect_id as number));
+  }
+
+  await createBot().api.sendMessage(
+    link.telegram_user_id,
+    `📞 <b>${escapeHtml(contact.name as string)}</b> wants to talk — no time set.\n\n` +
+      `<i>“${escapeHtml(cache.wants_call_quote as string)}”</i>\n\n` +
+      `They asked and are waiting. Book a time on their contact page, or reply in Bonzo.`,
+    { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } }
+  );
+
+  return true;
+}
+
+/** Handles the Dismiss button on a wants-to-talk card. */
+export async function handleWantsCallDismiss(
+  supabase: SupabaseClient,
+  contactId: string
+): Promise<void> {
+  /*
+   * Dismissed, not cleared. The request stays on the row so a later scan can
+   * tell "already answered" from "never asked" — and a newer message from the
+   * same lead lifts the dismissal, because asking twice is a stronger signal
+   * than asking once.
+   */
+  await supabase
+    .from("insights_cache")
+    .update({ wants_call_dismissed_at: new Date().toISOString() })
+    .eq("contact_id", contactId);
+}

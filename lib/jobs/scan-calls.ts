@@ -133,11 +133,71 @@ export const scanCalls: JobHandler = async (supabase, job) => {
   }
 
   if (!scan.proposed) {
+    /*
+     * No time, but possibly a request.
+     *
+     * Recorded rather than dropped: "let's talk in the morning, what time are
+     * you available?" is a lead waiting on a reply, and it is exactly what the
+     * time-extracting detector is blind to.
+     *
+     * Only written when it is newer than what is already stored, so a scan
+     * that re-reads old history cannot resurrect a request Eddie has already
+     * dealt with — and the dismissal is cleared alongside it, because a fresh
+     * ask deserves to be surfaced again.
+     */
+    if (scan.wantsCall) {
+      const { data: existing } = await supabase
+        .from("insights_cache")
+        .select("wants_call_at")
+        .eq("contact_id", contactId)
+        .maybeSingle();
+
+      const previous = existing?.wants_call_at
+        ? new Date(existing.wants_call_at as string).getTime()
+        : 0;
+
+      if (new Date(scan.wantsCall.at).getTime() > previous) {
+        await supabase
+          .from("insights_cache")
+          .upsert(
+            {
+              contact_id: contactId,
+              user_id: contact.user_id,
+              wants_call_at: scan.wantsCall.at,
+              wants_call_quote: scan.wantsCall.quote,
+              wants_call_dismissed_at: null,
+            },
+            { onConflict: "contact_id" }
+          );
+
+        const { pushWantsCall } = await import("@/lib/telegram/call-confirm");
+        await pushWantsCall(supabase, contact.user_id, contactId).catch(
+          (e: unknown) =>
+            console.error("[jobs/scan_calls] wants-call push failed:", e)
+        );
+
+        return {
+          summary: `${contact.name} asked to talk, no time named`,
+          usedModel,
+        };
+      }
+    }
+
     return {
       summary: `scanned ${scan.messagesScanned} messages, no call found`,
       usedModel,
     };
   }
+
+  /*
+   * A real time supersedes an outstanding request. They asked, then they
+   * named an hour; leaving the request up would have Eddie chasing a lead
+   * whose call is already in the diary.
+   */
+  await supabase
+    .from("insights_cache")
+    .update({ wants_call_at: null, wants_call_quote: null, wants_call_dismissed_at: null })
+    .eq("contact_id", contactId);
 
   const callId = await recordProposedCall(supabase, {
     userId: contact.user_id,

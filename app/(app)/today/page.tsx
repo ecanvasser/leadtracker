@@ -1,7 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import { loadToday } from "@/lib/turn/load";
-import { callsForDay, overdueCalls } from "@/lib/calls/book";
+import { callsForDay, overdueCalls, wantsCallLeads } from "@/lib/calls/book";
 import { createServiceClient } from "@/lib/supabase/service";
 import { loadSpeedToQuote } from "@/lib/turn/speed";
 import { TodayScreen } from "./today-screen";
@@ -33,9 +33,10 @@ export default async function TodayPage() {
   // on every page load — going through RLS twice for a join we already know is
   // scoped by user_id buys nothing.
   const service = createServiceClient();
-  const [calls, overdue] = await Promise.all([
+  const [calls, overdue, wantsCall] = await Promise.all([
     callsForDay(service, userId, board.timeZone),
     overdueCalls(service, userId),
+    wantsCallLeads(service, userId),
   ]);
 
   return (
@@ -47,6 +48,7 @@ export default async function TodayPage() {
       timeZone={board.timeZone}
       calls={calls}
       overdueCalls={overdue}
+      wantsCall={wantsCall}
       overdueDays={board.settings.overdueDays}
       speed={speed}
     />

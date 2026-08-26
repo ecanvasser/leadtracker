@@ -10,7 +10,12 @@
 
 import type { Context } from "grammy";
 import { createServiceClient } from "@/lib/supabase/service";
-import { callsForDay, overdueCalls, type DayCall } from "@/lib/calls/book";
+import {
+  callsForDay,
+  overdueCalls,
+  wantsCallLeads,
+  type DayCall,
+} from "@/lib/calls/book";
 import { addLocalDays, getUserTimezone, localDate } from "@/lib/time";
 import { bonzoProspectUrl } from "@/lib/turn/links";
 
@@ -76,10 +81,11 @@ export async function handleCalls(ctx: Context): Promise<void> {
   const today = localDate(new Date(), timeZone);
   const tomorrow = addLocalDays(today, 1);
 
-  const [todayCalls, tomorrowCalls, overdue] = await Promise.all([
+  const [todayCalls, tomorrowCalls, overdue, wants] = await Promise.all([
     callsForDay(supabase, userId, timeZone, today),
     callsForDay(supabase, userId, timeZone, tomorrow),
     overdueCalls(supabase, userId),
+    wantsCallLeads(supabase, userId),
   ]);
 
   const sections: string[] = [];
@@ -100,6 +106,21 @@ export async function handleCalls(ctx: Context): Promise<void> {
   if (tomorrowCalls.length > 0) {
     sections.push(
       `<b>Tomorrow</b>\n${tomorrowCalls.map((c) => line(c, timeZone)).join("\n")}`
+    );
+  }
+
+  if (wants.length > 0) {
+    // Listed last: a request with no time is real work, but it is not a
+    // deadline, and it must not push a call that starts in ten minutes down
+    // the screen.
+    sections.push(
+      `<b>Asked to talk — no time set</b>\n` +
+        wants
+          .map(
+            (w) =>
+              `${escapeHtml(w.contact_name)}\n   <i>${escapeHtml(w.quote)}</i>`
+          )
+          .join("\n")
     );
   }
 
