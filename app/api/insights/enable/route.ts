@@ -9,6 +9,8 @@ import {
 } from "@/lib/bonzo/client";
 import { refreshCache } from "@/lib/jobs/handlers";
 import { enqueueJob } from "@/lib/jobs/queue";
+import { runCallScan } from "@/lib/jobs/scan-calls";
+import { waitUntil } from "@vercel/functions";
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
@@ -128,8 +130,18 @@ export async function POST(request: NextRequest) {
      * nothing ever looked at what was said before the lead existed in this
      * app. The watermark is untouched, so the scan covers everything.
      *
-     * Enqueued, not awaited — linking a lead should stay fast, and the scan
-     * may reach a model when the wording is ambiguous.
+     * Run twice over, deliberately.
+     *
+     * The queued job is the durable path: it retries, and it survives this
+     * function being torn down mid-flight. But it waits for the worker's next
+     * five-minute tick, and a call request is the one thing here with someone
+     * else's clock attached — "call me at noon" read at 12:04 is worthless.
+     *
+     * So the scan also runs inline, after the response has already been sent,
+     * which makes the common case immediate. The second run is nearly free and
+     * cannot double up: the inline pass advances calls_scanned_through, so the
+     * queued one finds no new messages and returns after a single Bonzo read.
+     * recordProposedCall and the wants-call write are both idempotent anyway.
      */
     await enqueueJob(serviceClient, {
       userId,
@@ -137,6 +149,15 @@ export async function POST(request: NextRequest) {
       jobType: "scan_calls",
     }).catch((e: unknown) =>
       console.error("[insights/enable] call scan enqueue failed:", e)
+    );
+
+    waitUntil(
+      runCallScan(serviceClient, contactId)
+        .then((r) => console.log(`[insights/enable] inline call scan: ${r.summary}`))
+        .catch((e: unknown) =>
+          // The queued job above is the safety net; nothing is lost here.
+          console.error("[insights/enable] inline call scan failed:", e)
+        )
     );
 
     const { data: cache } = await serviceClient

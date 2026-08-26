@@ -30,10 +30,19 @@ import type { JobHandler } from "@/lib/jobs/handlers";
 import { getUserTimezone } from "@/lib/time";
 import { TERMINAL_STAGES } from "@/types/db";
 
-export const scanCalls: JobHandler = async (supabase, job) => {
-  const contactId = job.contact_id;
-  if (!contactId) throw new Error("scan_calls requires a contact_id");
-
+/**
+ * The scan itself, callable without a job row.
+ *
+ * Extracted so linking a lead can run it immediately rather than waiting for
+ * the worker's next five-minute tick. A call request is the one thing in this
+ * app with someone else's clock attached to it — "call me at noon" read at
+ * 12:04 is worthless — so the latency that is fine everywhere else is not fine
+ * here.
+ */
+export async function runCallScan(
+  supabase: Parameters<JobHandler>[0],
+  contactId: string
+): Promise<{ summary: string; usedModel: boolean }> {
   const { data: contact } = await supabase
     .from("contacts")
     .select("id, user_id, name, stage, phone, bonzo_prospect_id")
@@ -227,4 +236,10 @@ export const scanCalls: JobHandler = async (supabase, job) => {
     summary: `call proposed for ${contact.name} from ${scan.messagesScanned} messages`,
     usedModel,
   };
+}
+
+export const scanCalls: JobHandler = async (supabase, job) => {
+  const contactId = job.contact_id;
+  if (!contactId) throw new Error("scan_calls requires a contact_id");
+  return runCallScan(supabase, contactId);
 };
