@@ -23,6 +23,8 @@ import { PITCH_STYLE } from "@/lib/turn/badges";
 import { describeWait } from "@/lib/turn/format";
 import { bonzoProspectUrl } from "@/lib/turn/links";
 import type { TurnResult } from "@/lib/turn/types";
+import { CallsToday } from "@/components/calls/calls-today";
+import type { DayCall } from "@/lib/calls/book";
 import { formatSpeed, type SpeedToQuote } from "@/lib/turn/speed";
 import {
   LOAN_TYPE_LABELS,
@@ -36,6 +38,8 @@ interface TodayScreenProps {
   theirMove: TurnResult[];
   waiting: TurnResult[];
   counts: { your_move: number; their_move: number; waiting: number; total: number };
+  calls: DayCall[];
+  overdueCalls: DayCall[];
   timeZone: string;
   overdueDays: number;
   speed: SpeedToQuote;
@@ -52,6 +56,8 @@ export function TodayScreen({
   theirMove,
   waiting,
   counts,
+  calls,
+  overdueCalls,
   timeZone,
   overdueDays,
   speed,
@@ -105,6 +111,17 @@ export function TodayScreen({
             : `${counts.total} active ${counts.total === 1 ? "lead" : "leads"}, sorted by how long they've waited.`}
         </p>
       </header>
+
+      {/*
+        Above the counts, deliberately. A call is the only thing here with a
+        deadline someone else is holding you to — a quote owed can slip an hour
+        without anyone noticing, a call at noon cannot.
+      */}
+      <CallsToday
+        initialCalls={calls}
+        initialOverdue={overdueCalls}
+        timeZone={timeZone}
+      />
 
       {/*
         Section 2.1: the counts at the top are the product. If these three

@@ -33,6 +33,8 @@ export const JOB_TYPES = [
   "evaluate_workflows",
   // Phase 8, contact agents. Drafts one step of a deployed plan.
   "agent_touch",
+  // Reads a lead's conversation for a call commitment. Pattern-first.
+  "scan_calls",
 ] as const;
 
 export type JobType = (typeof JOB_TYPES)[number];

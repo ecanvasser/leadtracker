@@ -35,6 +35,7 @@ import { toast } from "sonner";
 import { ArrowLeft, Plus, Trash2, Phone, Mail, MessageSquare, SkipForward, Send } from "lucide-react";
 import { InsightsPanel } from "./insights-panel";
 import { AgentPanel } from "@/components/agents/agent-panel";
+import { BookCall } from "@/components/calls/book-call";
 import { useRouter } from "next/navigation";
 
 interface ContactDetailProps {
@@ -575,6 +576,9 @@ export function ContactDetail({
           {/* Above the insights: an agent is the thing on this page that will
               act on its own, so it should not be found by scrolling past a
               read-only panel. */}
+          {/* Above the agent: a booked call is a commitment to a person at a
+              specific hour, which outranks a sequence of maybes. */}
+          <BookCall contactId={contact.id} contactName={contact.name} />
           <AgentPanel contactId={contact.id} contactName={contact.name} />
           <InsightsPanel
             contact={contact}

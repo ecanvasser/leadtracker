@@ -17,6 +17,7 @@ import {
 } from "@/lib/telegram/commands";
 import { handlePause, handleResume } from "@/lib/telegram/workflow-handlers";
 import { handleToday } from "@/lib/telegram/today-handlers";
+import { handleCalls } from "@/lib/telegram/call-commands";
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
 
@@ -50,6 +51,7 @@ function getHandler(): (req: Request) => Promise<Response> {
   // function. Registered before the older flows for no reason other than
   // that it is now the one Eddie will reach for first.
   bot.command("today", handleToday);
+  bot.command("calls", handleCalls);
   bot.command("todo", handleTodo);
   bot.command("add", handleAdd);
   bot.command("list", handleList);

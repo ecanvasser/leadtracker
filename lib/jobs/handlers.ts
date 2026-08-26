@@ -38,6 +38,7 @@ import { getUserTimezone, localDate, leadAgeDays } from "@/lib/time";
 import { enqueueJob } from "@/lib/jobs/queue";
 import { recordModelUsage, withinBudget } from "@/lib/ai/usage";
 import { agentTouch } from "@/lib/jobs/agent-touch";
+import { scanCalls } from "@/lib/jobs/scan-calls";
 import { handleAgentStageChange, pauseAgentOnReply } from "@/lib/agents/lifecycle";
 import { scanForCallCommitments, recordProposedCall } from "@/lib/calls/scan";
 
@@ -214,6 +215,33 @@ export const refreshCache: JobHandler = async (supabase, job) => {
     lastClassifiedAt: cache?.lead_state_at as string | null | undefined,
     promptVersion: (cache?.lead_state_prompt_version as string | null) ?? null,
   });
+
+  /*
+   * Call scanning runs for every active lead, and above the model-work gate.
+   *
+   * The original scan sat below it, so it only ever ran for Quoted – Follow
+   * Up. Call requests arrive far earlier than that — usually while the lead is
+   * still a Hot Lead, often before this app knew the person existed — which is
+   * why one call had been detected across twenty-one active leads.
+   *
+   * Enqueued rather than run inline so the refresh stays short and a Bonzo
+   * hiccup retries on its own. Placement above the gate is the fix; putting it
+   * back below would silently restore the bug.
+   */
+  if (hasNew && !(TERMINAL_STAGES as readonly string[]).includes(contact.stage)) {
+    // Swallowed like the other follow-on work: the cache write, the
+    // classification and the reply detection are all still worth having if
+    // the queue insert fails, and the next refresh enqueues it again.
+    try {
+      await enqueueJob(supabase, {
+        userId: contact.user_id,
+        contactId: contactId,
+        jobType: "scan_calls",
+      });
+    } catch (e) {
+      console.error(`[jobs/refresh_cache] call scan enqueue failed for ${contactId}:`, e);
+    }
+  }
 
   const needsModelWork = eligible && (hasNew || !cache?.ai_analysis || due.classify);
 
@@ -772,6 +800,7 @@ export const handlers: Partial<Record<Job["job_type"], JobHandler>> = {
   refresh_cache: refreshCache,
   evaluate_workflows: evaluateWorkflowsJob,
   agent_touch: agentTouch,
+  scan_calls: scanCalls,
   draft_reply: draftReply,
   morning_digest: morningDigest,
 };

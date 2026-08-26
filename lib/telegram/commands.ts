@@ -103,6 +103,7 @@ export async function handleHelp(ctx: Context) {
   await ctx.reply(
     "<b>Commands:</b>\n\n" +
       "/today — Whose move is it: your move, overdue, waiting\n" +
+      "/calls — Calls booked today and tomorrow\n" +
       "/todo — View open tasks\n" +
       "/add — Add a new contact\n" +
       "/list — List contacts (optionally by stage)\n" +

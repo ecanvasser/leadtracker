@@ -303,8 +303,20 @@ describe("refresh_cache cost guard", () => {
     expect(classifyLeadState).not.toHaveBeenCalled();
     expect(getProspect).not.toHaveBeenCalled();
     expect(getProspectNotes).not.toHaveBeenCalled();
-    // Not even the follow-on work a new inbound triggers for an eligible lead.
-    expect(inserts).toEqual([]);
+    /*
+     * One job is enqueued, and only one: the call scan.
+     *
+     * That is the point of it running here. Call requests arrive while a lead
+     * is still hands-on — usually before this app knew the person existed —
+     * and gating the scan on stage is what left one call detected across
+     * twenty-one leads. It is safe on a cost path because it is pattern-first:
+     * a message with no call-shaped wording never reaches a model.
+     *
+     * The follow-on work that genuinely costs money — draft_reply — is still
+     * absent, which is what this test is really guarding.
+     */
+    expect(inserts.map((i) => i.job_type)).toEqual(["scan_calls"]);
+    expect(inserts.map((i) => i.job_type)).not.toContain("draft_reply");
   });
 
   it("costs nothing at all for a terminal lead — not even the free call", async () => {

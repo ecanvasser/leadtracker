@@ -333,21 +333,54 @@ export function instantForLocalTime(
     `${date}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00Z`
   );
 
-  // Two passes: the first correction can itself cross a transition.
+  /*
+   * Correct the DATE as well as the time.
+   *
+   * Correcting only hour and minute lands on the right wall-clock time and
+   * potentially the wrong day. Treating "6:00" as UTC puts the guess at 23:00
+   * the previous evening in Los Angeles; nudging the clock forward six hours
+   * then produces 6am — on the day before the one that was asked for. Every
+   * local time earlier than the zone's offset was affected, so in California
+   * that was midnight through 06:59, and a lead who wrote "call me at 6am
+   * tomorrow" got a reminder a day early.
+   *
+   * Three passes rather than two, because correcting the day can itself cross
+   * a DST transition and shift the hour again.
+   */
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+
+  const targetDays = daysFromEpoch(date);
+
   let result = guess;
-  for (let i = 0; i < 2; i++) {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      hour: "numeric",
-      minute: "numeric",
-      hour12: false,
-    }).formatToParts(result);
-    const h = Number(parts.find((p) => p.type === "hour")?.value ?? hour);
-    const m = Number(parts.find((p) => p.type === "minute")?.value ?? minute);
-    const driftMs = (hour - h) * 3_600_000 + (minute - m) * 60_000;
-    if (driftMs === 0) break;
-    result = new Date(result.getTime() + driftMs);
+  for (let i = 0; i < 3; i++) {
+    const parts = fmt.formatToParts(result);
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+
+    // Intl renders midnight as "24" in some zones under hour12:false.
+    const h = Number(get("hour")) % 24;
+    const m = Number(get("minute"));
+    const landedOn = `${get("year")}-${get("month")}-${get("day")}`;
+
+    const dayDriftMs = (targetDays - daysFromEpoch(landedOn)) * 86_400_000;
+    const timeDriftMs = (hour - h) * 3_600_000 + (minute - m) * 60_000;
+
+    if (dayDriftMs === 0 && timeDriftMs === 0) break;
+    result = new Date(result.getTime() + dayDriftMs + timeDriftMs);
   }
 
   return result;
+}
+
+/** Whole days from the epoch for a YYYY-MM-DD string, zone-free. */
+function daysFromEpoch(date: string): number {
+  const [y, m, d] = date.split("-").map(Number);
+  return Math.round(Date.UTC(y, m - 1, d) / 86_400_000);
 }

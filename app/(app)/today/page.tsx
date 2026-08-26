@@ -1,6 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import { loadToday } from "@/lib/turn/load";
+import { callsForDay, overdueCalls } from "@/lib/calls/book";
+import { createServiceClient } from "@/lib/supabase/service";
 import { loadSpeedToQuote } from "@/lib/turn/speed";
 import { TodayScreen } from "./today-screen";
 
@@ -27,6 +29,15 @@ export default async function TodayPage() {
     loadSpeedToQuote(supabase, userId),
   ]);
 
+  // Service client: scheduled_calls joins contacts, and the day list is read
+  // on every page load — going through RLS twice for a join we already know is
+  // scoped by user_id buys nothing.
+  const service = createServiceClient();
+  const [calls, overdue] = await Promise.all([
+    callsForDay(service, userId, board.timeZone),
+    overdueCalls(service, userId),
+  ]);
+
   return (
     <TodayScreen
       yourMove={board.your_move}
@@ -34,6 +45,8 @@ export default async function TodayPage() {
       waiting={board.waiting}
       counts={board.counts}
       timeZone={board.timeZone}
+      calls={calls}
+      overdueCalls={overdue}
       overdueDays={board.settings.overdueDays}
       speed={speed}
     />

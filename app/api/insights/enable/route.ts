@@ -8,6 +8,7 @@ import {
   type BonzoProspect,
 } from "@/lib/bonzo/client";
 import { refreshCache } from "@/lib/jobs/handlers";
+import { enqueueJob } from "@/lib/jobs/queue";
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
@@ -117,6 +118,26 @@ export async function POST(request: NextRequest) {
       created_at: new Date().toISOString(),
       completed_at: null,
     });
+
+    /*
+     * Read the whole history for a call commitment, now that there is one to
+     * read.
+     *
+     * This is the case that prompted the feature: a lead texts "call me at
+     * noon tomorrow" in Bonzo, Eddie adds them here afterwards, and until now
+     * nothing ever looked at what was said before the lead existed in this
+     * app. The watermark is untouched, so the scan covers everything.
+     *
+     * Enqueued, not awaited — linking a lead should stay fast, and the scan
+     * may reach a model when the wording is ambiguous.
+     */
+    await enqueueJob(serviceClient, {
+      userId,
+      contactId,
+      jobType: "scan_calls",
+    }).catch((e: unknown) =>
+      console.error("[insights/enable] call scan enqueue failed:", e)
+    );
 
     const { data: cache } = await serviceClient
       .from("insights_cache")
