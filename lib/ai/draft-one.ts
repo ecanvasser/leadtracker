@@ -21,6 +21,7 @@
  */
 
 import { callModel, DRAFT_TEMPERATURE, type ModelUsage } from "@/lib/ai/models";
+import { playbookBlock } from "@/lib/ai/playbook";
 import {
   buildConstraintBlock,
   validateDraft,
@@ -320,7 +321,18 @@ export async function draftOne(input: DraftOneInput): Promise<DraftOneResult> {
     ),
   };
 
+  /*
+   * System blocks, most stable first, with the cache breakpoint on the last.
+   *
+   * All three are identical across every draft — only the user message carries
+   * the lead — so the whole prefix caches and a repeat draft pays about a
+   * tenth for it. That is what makes it affordable to send Eddie's entire
+   * playbook on every call rather than trying to select from it.
+   */
+  const playbook = playbookBlock();
+
   const system = [
+    ...(playbook ? [{ type: "text" as const, text: playbook }] : []),
     { type: "text" as const, text: DRAFT_SYSTEM_PREFIX },
     {
       type: "text" as const,
@@ -328,6 +340,7 @@ export async function draftOne(input: DraftOneInput): Promise<DraftOneResult> {
         brokerName: input.brokerName,
         brokerCompany: input.brokerCompany,
       }),
+      cache_control: { type: "ephemeral" as const },
     },
   ];
 

@@ -11,6 +11,7 @@ import {
   type DraftingSettings,
   type DraftingMode,
 } from "@/components/settings/drafting-settings";
+import { hasPlaybook } from "@/lib/ai/playbook";
 import { resolveCadenceConfig } from "@/lib/cadence/config";
 import { modelFor } from "@/lib/ai/models";
 import {
@@ -108,7 +109,7 @@ export default async function SettingsPage() {
         todaySpend={{ inputTokens, outputTokens, calls }}
       />
 
-      <DraftingSettingsPanel initial={drafting} />
+      <DraftingSettingsPanel initial={drafting} playbookLoaded={hasPlaybook()} />
 
       <TelegramSettings userId={userId} initialLink={link} />
     </div>

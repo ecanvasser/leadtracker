@@ -55,7 +55,13 @@ const MODES: { value: DraftingMode; label: string; blurb: string }[] = [
   },
 ];
 
-export function DraftingSettingsPanel({ initial }: { initial: DraftingSettings }) {
+export function DraftingSettingsPanel({
+  initial,
+  playbookLoaded,
+}: {
+  initial: DraftingSettings;
+  playbookLoaded: boolean;
+}) {
   const [mode, setMode] = useState<DraftingMode>(initial.drafting_mode);
   const [slots, setSlots] = useState(initial.draft_schedule_hours.join(", "));
   const [redrafts, setRedrafts] = useState(String(initial.max_redrafts_per_day));
@@ -182,6 +188,34 @@ export function DraftingSettingsPanel({ initial }: { initial: DraftingSettings }
               away.
             </p>
           </div>
+        </div>
+
+        {/*
+          Whether the playbook is actually loaded.
+          
+          It lives in the repo, so there is no control for it here — but with
+          no indicator, the only way to know a paste had taken effect would be
+          to read a draft and guess.
+        */}
+        <div className="rounded-lg border border-border/60 px-3 py-2.5">
+          <p className="text-xs">
+            <span className="font-medium">Your playbook:</span>{" "}
+            {playbookLoaded ? (
+              <span className="text-emerald-500">
+                loaded — every draft is written with it
+              </span>
+            ) : (
+              <span className="text-muted-foreground">
+                empty. Drafts know only what one lead&apos;s conversation shows.
+              </span>
+            )}
+          </p>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            Your programs, objections and how you answer them. Lives in{" "}
+            <code className="rounded bg-muted px-1">lib/ai/playbook.ts</code> so
+            it is version-controlled — a change to it shows up in the diff next
+            to a change in draft quality.
+          </p>
         </div>
 
         <Button onClick={save} disabled={saving}>
