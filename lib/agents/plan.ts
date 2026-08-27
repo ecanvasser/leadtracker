@@ -11,6 +11,7 @@
  */
 
 import { callModel, type ModelUsage } from "@/lib/ai/models";
+import { playbookBlock } from "@/lib/ai/playbook";
 import {
   getMortgageFields,
   isOutbound,
@@ -173,9 +174,27 @@ export function normalizePlan(raw: AgentPlan, durationDays: number): AgentPlan {
 }
 
 export async function buildPlan(input: BuildPlanInput): Promise<BuildPlanResult> {
+  /*
+   * The playbook shapes the plan as much as it shapes a draft.
+   *
+   * A step's angle is a decision about which objection to work and how, which
+   * is exactly what Eddie's training covers. Without it the planner invents
+   * generic angles; with it, "ask whether it is the cost or the commitment"
+   * comes from a reframe he actually uses. Cached, and identical across every
+   * plan.
+   */
+  const playbook = playbookBlock();
+
   const result = await callModel<AgentPlan>({
     role: "analysis",
-    system: PLAN_SYSTEM,
+    system: [
+      ...(playbook ? [{ type: "text" as const, text: playbook }] : []),
+      {
+        type: "text" as const,
+        text: PLAN_SYSTEM,
+        cache_control: { type: "ephemeral" as const },
+      },
+    ],
     schema: PLAN_SCHEMA,
     maxTokens: 4096,
     messages: [{ role: "user", content: buildPlanMessage(input) }],
